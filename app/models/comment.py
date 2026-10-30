@@ -1,0 +1,30 @@
+"""Comment SQLAlchemy model."""
+
+from sqlalchemy import ForeignKey, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.core.database import Base
+
+
+class Comment(Base):
+    """A comment on a task, authored by a user."""
+
+    __tablename__ = "comments"
+
+    task_id: Mapped[int] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False
+    )
+    author_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # --- Relationships ---
+    task: Mapped["Task"] = relationship(  # noqa: F821
+        back_populates="comments",
+        lazy="selectin",
+    )
+    author: Mapped["User"] = relationship(lazy="selectin")  # noqa: F821
+
+    def __repr__(self) -> str:
+        return f"<Comment id={self.id} task={self.task_id}>"
