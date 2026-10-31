@@ -1,11 +1,16 @@
 """Workspace and WorkspaceMember SQLAlchemy models."""
 
 import enum
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Enum, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+
+if TYPE_CHECKING:
+    from app.models.project import Project
+    from app.models.user import User
 
 
 class WorkspaceRole(str, enum.Enum):

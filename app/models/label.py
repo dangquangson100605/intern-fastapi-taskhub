@@ -1,9 +1,15 @@
 """Label and TaskLabel SQLAlchemy models."""
 
+from typing import TYPE_CHECKING
+
 from sqlalchemy import Column, ForeignKey, String, Table
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+
+if TYPE_CHECKING:
+    from app.models.project import Project
+    from app.models.task import Task
 
 # --- Association table (many-to-many: Task <-> Label) ---
 task_labels = Table(

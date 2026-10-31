@@ -1,11 +1,15 @@
 """User SQLAlchemy model."""
 
 import enum
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, Enum, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+
+if TYPE_CHECKING:
+    from app.models.workspace import Workspace
 
 
 class UserRole(str, enum.Enum):
