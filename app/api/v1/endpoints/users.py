@@ -1,12 +1,13 @@
 """User API endpoints.
 
-Provides CRUD operations for the User resource.
+Provides CRUD operations and profile management for the User resource.
 """
 
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dependencies import get_db
+from app.core.dependencies import get_current_user, get_db
+from app.models.user import User
 from app.schemas.common import MessageResponse, PaginatedResponse
 from app.schemas.user import UserCreate, UserResponse, UserUpdate
 from app.services.user import UserService
@@ -60,6 +61,48 @@ async def list_users(
         limit=result.limit,
         total_pages=result.total_pages,
     )
+
+
+# --- Current User Profile Endpoints (placed before /{user_id} to avoid collision) ---
+
+
+@router.get(
+    "/me",
+    response_model=UserResponse,
+    summary="Get current user profile",
+    description="Retrieve the profile of the currently authenticated user.",
+    responses={
+        401: {"description": "Not authenticated or token expired"},
+    },
+)
+async def get_me(
+    current_user: User = Depends(get_current_user),
+) -> UserResponse:
+    """Get profile of currently logged-in user."""
+    return UserResponse.model_validate(current_user)
+
+
+@router.patch(
+    "/me",
+    response_model=UserResponse,
+    summary="Update current user profile",
+    description="Update profile fields of the currently authenticated user.",
+    responses={
+        401: {"description": "Not authenticated or token expired"},
+        409: {"description": "Email already in use"},
+    },
+)
+async def update_me(
+    data: UserUpdate,
+    current_user: User = Depends(get_current_user),
+    service: UserService = Depends(get_user_service),
+) -> UserResponse:
+    """Update profile of currently logged-in user."""
+    user = await service.update_user(current_user.id, data)
+    return UserResponse.model_validate(user)
+
+
+# --- User By ID Endpoints ---
 
 
 @router.get(

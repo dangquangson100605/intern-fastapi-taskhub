@@ -3,6 +3,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictException, NotFoundException
+from app.core.security import hash_password
 from app.models.user import User
 from app.repositories.base import PaginationResult
 from app.repositories.user import UserRepository
@@ -25,8 +26,7 @@ class UserService:
         return await self.repo.create(
             email=data.email,
             full_name=data.full_name,
-            # Day 1: store plain text temporarily — will hash in Day 3
-            hashed_password=data.password,
+            hashed_password=hash_password(data.password),
         )
 
     async def get_user_by_id(self, user_id: int) -> User:

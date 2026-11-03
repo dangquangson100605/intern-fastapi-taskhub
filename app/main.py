@@ -26,6 +26,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("🔴 Redis: {}:{}", settings.REDIS_HOST, settings.REDIS_PORT)
     yield
     logger.info("🛑 Shutting down TaskHub")
+    from app.core.redis import close_redis
+    await close_redis()
 
 
 # --- Create FastAPI App ---
