@@ -79,9 +79,6 @@ class ConflictException(AppException):
         )
 
 
-# --- Global Exception Handlers ---
-
-
 async def app_exception_handler(request: Request, exc: AppException) -> JSONResponse:
     """Handle custom AppException and return consistent JSON."""
     return JSONResponse(

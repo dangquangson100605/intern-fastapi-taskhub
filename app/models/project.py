@@ -1,11 +1,17 @@
 """Project SQLAlchemy model."""
 
 import enum
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Enum, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+
+if TYPE_CHECKING:
+    from app.models.label import Label
+    from app.models.task import Task
+    from app.models.workspace import Workspace
 
 
 class ProjectStatus(str, enum.Enum):
@@ -29,17 +35,16 @@ class Project(Base):
         Enum(ProjectStatus), default=ProjectStatus.ACTIVE, nullable=False
     )
 
-    # --- Relationships ---
-    workspace: Mapped["Workspace"] = relationship(  # noqa: F821
+    workspace: Mapped["Workspace"] = relationship(
         back_populates="projects",
         lazy="selectin",
     )
-    tasks: Mapped[list["Task"]] = relationship(  # noqa: F821
+    tasks: Mapped[list["Task"]] = relationship(
         back_populates="project",
         cascade="all, delete-orphan",
         lazy="selectin",
     )
-    labels: Mapped[list["Label"]] = relationship(  # noqa: F821
+    labels: Mapped[list["Label"]] = relationship(
         back_populates="project",
         cascade="all, delete-orphan",
         lazy="selectin",

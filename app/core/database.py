@@ -13,7 +13,6 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
-# --- Async Engine & Session Factory ---
 async_engine = create_async_engine(
     settings.DATABASE_URL,
     echo=settings.DEBUG,
@@ -29,7 +28,6 @@ AsyncSessionLocal = async_sessionmaker(
 )
 
 
-# --- Declarative Base ---
 class Base(DeclarativeBase):
     """Base class for all SQLAlchemy models.
 

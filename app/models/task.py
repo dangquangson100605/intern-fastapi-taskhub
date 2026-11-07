@@ -1,12 +1,19 @@
 """Task SQLAlchemy model."""
 
-import enum
 from datetime import datetime
+import enum
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, Enum, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+
+if TYPE_CHECKING:
+    from app.models.comment import Comment
+    from app.models.label import Label
+    from app.models.project import Project
+    from app.models.user import User
 
 
 class TaskStatus(str, enum.Enum):
@@ -53,25 +60,24 @@ class Task(Base):
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
 
-    # --- Relationships ---
-    project: Mapped["Project"] = relationship(  # noqa: F821
+    project: Mapped["Project"] = relationship(
         back_populates="tasks",
         lazy="selectin",
     )
-    assignee: Mapped["User | None"] = relationship(  # noqa: F821
+    assignee: Mapped["User | None"] = relationship(
         foreign_keys=[assignee_id],
         lazy="selectin",
     )
-    creator: Mapped["User"] = relationship(  # noqa: F821
+    creator: Mapped["User"] = relationship(
         foreign_keys=[created_by],
         lazy="selectin",
     )
-    labels: Mapped[list["Label"]] = relationship(  # noqa: F821
+    labels: Mapped[list["Label"]] = relationship(
         secondary="task_labels",
         back_populates="tasks",
         lazy="selectin",
     )
-    comments: Mapped[list["Comment"]] = relationship(  # noqa: F821
+    comments: Mapped[list["Comment"]] = relationship(
         back_populates="task",
         cascade="all, delete-orphan",
         lazy="selectin",

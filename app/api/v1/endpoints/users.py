@@ -6,6 +6,7 @@ Provides CRUD operations for the User resource.
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.constants import SUCCESS_USER_DELETED
 from app.core.dependencies import get_db
 from app.schemas.common import MessageResponse, PaginatedResponse
 from app.schemas.user import UserCreate, UserResponse, UserUpdate
@@ -113,4 +114,4 @@ async def delete_user(
 ) -> MessageResponse:
     """Delete a user by their ID."""
     await service.delete_user(user_id)
-    return MessageResponse(message="User deleted successfully")
+    return MessageResponse(message=SUCCESS_USER_DELETED)

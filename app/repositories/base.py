@@ -59,17 +59,14 @@ class BaseRepository(Generic[ModelType]):
         """Fetch paginated records with optional equality filters."""
         query = select(self.model)
 
-        # Apply equality filters
         for field, value in filters.items():
             if value is not None and hasattr(self.model, field):
                 query = query.where(getattr(self.model, field) == value)
 
-        # Count total
         count_query = select(func.count()).select_from(query.subquery())
         total_result = await self.session.execute(count_query)
         total = total_result.scalar() or 0
 
-        # Paginate
         offset = (page - 1) * limit
         query = query.offset(offset).limit(limit)
         result = await self.session.execute(query)

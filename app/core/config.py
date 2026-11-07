@@ -18,28 +18,23 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    # --- Application ---
     APP_NAME: str = "TaskHub"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
 
-    # --- Server ---
     HOST: str = "0.0.0.0"
     PORT: int = 8000
 
-    # --- Database ---
     DB_HOST: str = "localhost"
     DB_PORT: int = 3306
     DB_USER: str = "root"
     DB_PASSWORD: str = ""
     DB_NAME: str = "taskhub"
 
-    # --- Redis ---
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
 
-    # --- JWT ---
     JWT_SECRET_KEY: str = "change-me-in-production"
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30

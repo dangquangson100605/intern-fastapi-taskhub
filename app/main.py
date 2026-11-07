@@ -28,7 +28,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("🛑 Shutting down TaskHub")
 
 
-# --- Create FastAPI App ---
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
@@ -42,24 +41,20 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# --- CORS Middleware ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Restrict in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- Exception Handlers ---
 app.add_exception_handler(AppException, app_exception_handler)  # type: ignore[arg-type]
 app.add_exception_handler(Exception, generic_exception_handler)
 
-# --- Routers ---
 app.include_router(api_v1_router)
 
 
-# --- Health Check ---
 @app.get("/health", tags=["Health"])
 async def health_check() -> dict[str, str]:
     """Simple health check endpoint."""
