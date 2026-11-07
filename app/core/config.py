@@ -5,6 +5,7 @@ validation — the app crashes immediately if required env vars are missing.
 """
 
 from functools import lru_cache
+from urllib.parse import quote_plus
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -43,16 +44,20 @@ class Settings(BaseSettings):
     @property
     def DATABASE_URL(self) -> str:
         """Build async MySQL connection string."""
+        user = quote_plus(self.DB_USER)
+        password = quote_plus(self.DB_PASSWORD)
         return (
-            f"mysql+asyncmy://{self.DB_USER}:{self.DB_PASSWORD}"
+            f"mysql+asyncmy://{user}:{password}"
             f"@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
         )
 
     @property
     def SYNC_DATABASE_URL(self) -> str:
         """Build sync MySQL connection string (for Alembic)."""
+        user = quote_plus(self.DB_USER)
+        password = quote_plus(self.DB_PASSWORD)
         return (
-            f"mysql+pymysql://{self.DB_USER}:{self.DB_PASSWORD}"
+            f"mysql+pymysql://{user}:{password}"
             f"@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
         )
 
