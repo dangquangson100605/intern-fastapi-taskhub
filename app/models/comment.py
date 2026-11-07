@@ -18,10 +18,14 @@ class Comment(Base):
     __tablename__ = "comments"
 
     task_id: Mapped[int] = mapped_column(
-        ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("tasks.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
     )
     author_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
     )
     content: Mapped[str] = mapped_column(Text, nullable=False)
 

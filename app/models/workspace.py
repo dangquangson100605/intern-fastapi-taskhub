@@ -1,24 +1,17 @@
 """Workspace and WorkspaceMember SQLAlchemy models."""
 
-import enum
 from typing import TYPE_CHECKING
 
 from sqlalchemy import Enum, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.core.constants import WORKSPACE_NAME_MAX_LENGTH
 from app.core.database import Base
+from app.models.enums import WorkspaceRole
 
 if TYPE_CHECKING:
     from app.models.project import Project
     from app.models.user import User
-
-
-class WorkspaceRole(str, enum.Enum):
-    """Roles within a specific workspace."""
-
-    OWNER = "OWNER"
-    EDITOR = "EDITOR"
-    VIEWER = "VIEWER"
 
 
 class Workspace(Base):
@@ -26,9 +19,14 @@ class Workspace(Base):
 
     __tablename__ = "workspaces"
 
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str] = mapped_column(
+        String(WORKSPACE_NAME_MAX_LENGTH),
+        nullable=False,
+    )
     owner_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
     )
 
     owner: Mapped["User"] = relationship(
@@ -38,11 +36,13 @@ class Workspace(Base):
     members: Mapped[list["WorkspaceMember"]] = relationship(
         back_populates="workspace",
         cascade="all, delete-orphan",
+        passive_deletes=True,
         lazy="selectin",
     )
     projects: Mapped[list["Project"]] = relationship(
         back_populates="workspace",
         cascade="all, delete-orphan",
+        passive_deletes=True,
         lazy="selectin",
     )
 
@@ -56,13 +56,20 @@ class WorkspaceMember(Base):
     __tablename__ = "workspace_members"
 
     workspace_id: Mapped[int] = mapped_column(
-        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
     )
     user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
     )
     role: Mapped[WorkspaceRole] = mapped_column(
-        Enum(WorkspaceRole), default=WorkspaceRole.VIEWER, nullable=False
+        Enum(WorkspaceRole, native_enum=False, create_constraint=True),
+        server_default=WorkspaceRole.VIEWER.value,
+        default=WorkspaceRole.VIEWER,
+        nullable=False,
     )
 
     workspace: Mapped["Workspace"] = relationship(

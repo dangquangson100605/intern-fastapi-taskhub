@@ -7,12 +7,15 @@ and lifespan events (startup/shutdown).
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from loguru import logger
+from sqlalchemy.exc import IntegrityError
 
 from app.api.v1.router import api_v1_router
 from app.core.config import get_settings
+from app.core.constants import ERROR_DATABASE_INTEGRITY
 from app.core.exceptions import AppException, app_exception_handler, generic_exception_handler
 
 settings = get_settings()
@@ -49,7 +52,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.add_exception_handler(AppException, app_exception_handler)  # type: ignore[arg-type]
+async def integrity_exception_handler(request: Request, exc: IntegrityError) -> JSONResponse:
+    """Handle database integrity errors (unique constraint, foreign key violation)."""
+    logger.warning("Database integrity constraint violated: {}", exc)
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content={"detail": ERROR_DATABASE_INTEGRITY},
+    )
+
+
+app.add_exception_handler(AppException, app_exception_handler)
+app.add_exception_handler(IntegrityError, integrity_exception_handler)
 app.add_exception_handler(Exception, generic_exception_handler)
 
 app.include_router(api_v1_router)

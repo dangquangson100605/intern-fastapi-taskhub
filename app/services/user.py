@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import ERROR_EMAIL_ALREADY_IN_USE, ERROR_EMAIL_ALREADY_REGISTERED
 from app.core.exceptions import ConflictException, NotFoundException
+from app.core.security import hash_password
 from app.models.user import User
 from app.repositories.base import PaginationResult
 from app.repositories.user import UserRepository
@@ -18,7 +19,7 @@ class UserService:
         self.repo = repo or UserRepository(session)
 
     async def create_user(self, data: UserCreate) -> User:
-        """Register a new user (Day 1: simple version without hashing)."""
+        """Register a new user with hashed password."""
         existing = await self.repo.get_by_email(data.email)
         if existing:
             raise ConflictException(ERROR_EMAIL_ALREADY_REGISTERED.format(email=data.email))
@@ -26,7 +27,7 @@ class UserService:
         return await self.repo.create(
             email=data.email,
             full_name=data.full_name,
-            hashed_password=data.password,
+            hashed_password=hash_password(data.password),
         )
 
     async def get_user_by_id(self, user_id: int) -> User:
