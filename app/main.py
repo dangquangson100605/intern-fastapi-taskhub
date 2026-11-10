@@ -4,15 +4,19 @@ Creates the FastAPI app instance, registers routers, exception handlers,
 and lifespan events (startup/shutdown).
 """
 
-from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from loguru import logger
+from sqlalchemy.exc import IntegrityError
 
 from app.api.v1.router import api_v1_router
 from app.core.config import get_settings
+from app.core.constants import ERROR_DATABASE_INTEGRITY
 from app.core.exceptions import AppException, app_exception_handler, generic_exception_handler
 
 settings = get_settings()
@@ -43,13 +47,44 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.add_exception_handler(AppException, app_exception_handler)  # type: ignore[arg-type]
+
+async def validation_exception_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """Format 422 validation errors to match the uniform API error format."""
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={
+            "error": "VALIDATION_ERROR",
+            "message": "Request validation failed",
+            "path": str(request.url),
+            "details": exc.errors(),
+        },
+    )
+
+
+async def integrity_exception_handler(request: Request, exc: IntegrityError) -> JSONResponse:
+    """Handle database integrity errors (unique constraint, foreign key violation)."""
+    logger.warning("Database integrity constraint violated: {}", exc)
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content={
+            "error": "CONFLICT",
+            "message": ERROR_DATABASE_INTEGRITY,
+            "path": str(request.url),
+        },
+    )
+
+
+app.add_exception_handler(AppException, app_exception_handler)
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
+app.add_exception_handler(IntegrityError, integrity_exception_handler)
 app.add_exception_handler(Exception, generic_exception_handler)
 
 app.include_router(api_v1_router)
