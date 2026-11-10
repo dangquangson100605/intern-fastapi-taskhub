@@ -3,23 +3,21 @@
 Provides CRUD operations for the User resource.
 """
 
-from fastapi import APIRouter, Depends, Query, status
-from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Annotated
 
-from app.core.constants import SUCCESS_USER_DELETED
-from app.core.dependencies import get_db
+from fastapi import APIRouter, Query, status
+
+from app.core.constants import (
+    DEFAULT_LIMIT,
+    DEFAULT_PAGE,
+    MAX_LIMIT,
+    SUCCESS_USER_DELETED,
+)
+from app.core.dependencies import UserServiceDep
 from app.schemas.common import MessageResponse, PaginatedResponse
 from app.schemas.user import UserCreate, UserResponse, UserUpdate
-from app.services.user import UserService
 
 router = APIRouter(prefix="/users", tags=["Users"])
-
-
-def get_user_service(
-    session: AsyncSession = Depends(get_db),
-) -> UserService:
-    """Dependency: instantiate UserService with a DB session."""
-    return UserService(session)
 
 
 @router.post(
@@ -34,7 +32,7 @@ def get_user_service(
 )
 async def create_user(
     data: UserCreate,
-    service: UserService = Depends(get_user_service),
+    service: UserServiceDep,
 ) -> UserResponse:
     """Create a new user account."""
     user = await service.create_user(data)
@@ -48,9 +46,9 @@ async def create_user(
     description="Retrieve a paginated list of all users.",
 )
 async def list_users(
-    page: int = Query(default=1, ge=1, description="Page number"),
-    limit: int = Query(default=20, ge=1, le=100, description="Items per page"),
-    service: UserService = Depends(get_user_service),
+    service: UserServiceDep,
+    page: Annotated[int, Query(ge=1, description="Page number")] = DEFAULT_PAGE,
+    limit: Annotated[int, Query(ge=1, le=MAX_LIMIT, description="Items per page")] = DEFAULT_LIMIT,
 ) -> PaginatedResponse[UserResponse]:
     """List users with pagination."""
     result = await service.list_users(page=page, limit=limit)
@@ -73,7 +71,7 @@ async def list_users(
 )
 async def get_user(
     user_id: int,
-    service: UserService = Depends(get_user_service),
+    service: UserServiceDep,
 ) -> UserResponse:
     """Retrieve a single user by their ID."""
     user = await service.get_user_by_id(user_id)
@@ -93,7 +91,7 @@ async def get_user(
 async def update_user(
     user_id: int,
     data: UserUpdate,
-    service: UserService = Depends(get_user_service),
+    service: UserServiceDep,
 ) -> UserResponse:
     """Update user profile fields."""
     user = await service.update_user(user_id, data)
@@ -110,7 +108,7 @@ async def update_user(
 )
 async def delete_user(
     user_id: int,
-    service: UserService = Depends(get_user_service),
+    service: UserServiceDep,
 ) -> MessageResponse:
     """Delete a user by their ID."""
     await service.delete_user(user_id)

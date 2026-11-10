@@ -13,7 +13,7 @@ from app.core.constants import (
     USER_PASSWORD_MAX_LENGTH,
     USER_PASSWORD_MIN_LENGTH,
 )
-from app.models.user import UserRole
+from app.models.enums import UserRole
 from app.schemas.base import BaseSchema
 
 
@@ -51,17 +51,6 @@ class UserUpdate(BaseSchema):
             field_name = info.field_name or "field"
             raise ValueError(ERROR_FIELD_CANNOT_BE_NULL.format(field=field_name))
         return value
-
-
-class ChangePassword(BaseSchema):
-    """Schema for changing password."""
-
-    current_password: str
-    new_password: str = Field(
-        ...,
-        min_length=USER_PASSWORD_MIN_LENGTH,
-        max_length=USER_PASSWORD_MAX_LENGTH,
-    )
 
 
 class UserResponse(BaseSchema):

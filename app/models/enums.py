@@ -3,14 +3,14 @@
 import enum
 
 
-class UserRole(str, enum.Enum):
+class UserRole(enum.StrEnum):
     """System-wide user roles."""
 
     ADMIN = "ADMIN"
     MEMBER = "MEMBER"
 
 
-class WorkspaceRole(str, enum.Enum):
+class WorkspaceRole(enum.StrEnum):
     """Roles within a specific workspace."""
 
     OWNER = "OWNER"
@@ -18,14 +18,14 @@ class WorkspaceRole(str, enum.Enum):
     VIEWER = "VIEWER"
 
 
-class ProjectStatus(str, enum.Enum):
+class ProjectStatus(enum.StrEnum):
     """Project lifecycle statuses."""
 
     ACTIVE = "ACTIVE"
     ARCHIVED = "ARCHIVED"
 
 
-class TaskStatus(str, enum.Enum):
+class TaskStatus(enum.StrEnum):
     """Task workflow statuses."""
 
     TODO = "TODO"
@@ -34,11 +34,10 @@ class TaskStatus(str, enum.Enum):
     DONE = "DONE"
 
 
-class TaskPriority(str, enum.Enum):
+class TaskPriority(enum.StrEnum):
     """Task priority levels."""
 
     LOW = "LOW"
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
     URGENT = "URGENT"
-

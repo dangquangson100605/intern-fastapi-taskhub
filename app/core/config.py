@@ -26,17 +26,24 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 8000
 
+    CORS_ORIGINS: list[str] = [
+        "http://localhost:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:8000",
+    ]
+
     DB_HOST: str = "localhost"
     DB_PORT: int = 3306
     DB_USER: str = "root"
-    DB_PASSWORD: str = ""
+    DB_PASSWORD: str
     DB_NAME: str = "taskhub"
 
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
 
-    JWT_SECRET_KEY: str = "change-me-in-production"
+    JWT_SECRET_KEY: str
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
@@ -46,20 +53,14 @@ class Settings(BaseSettings):
         """Build async MySQL connection string."""
         user = quote_plus(self.DB_USER)
         password = quote_plus(self.DB_PASSWORD)
-        return (
-            f"mysql+asyncmy://{user}:{password}"
-            f"@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
-        )
+        return f"mysql+asyncmy://{user}:{password}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
 
     @property
     def SYNC_DATABASE_URL(self) -> str:
         """Build sync MySQL connection string (for Alembic)."""
         user = quote_plus(self.DB_USER)
         password = quote_plus(self.DB_PASSWORD)
-        return (
-            f"mysql+pymysql://{user}:{password}"
-            f"@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
-        )
+        return f"mysql+pymysql://{user}:{password}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
 
     @property
     def REDIS_URL(self) -> str:

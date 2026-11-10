@@ -5,6 +5,18 @@ Provides a consistent JSON error response format across the entire API.
 
 from fastapi import HTTPException, Request, status
 from fastapi.responses import JSONResponse
+from loguru import logger
+
+from app.core.constants import (
+    ERROR_BAD_REQUEST,
+    ERROR_INTERNAL_SERVER,
+    ERROR_NOT_AUTHENTICATED,
+    ERROR_PERMISSION_DENIED,
+    ERROR_RESOURCE_ALREADY_EXISTS,
+    ERROR_RESOURCE_NOT_FOUND,
+    ERROR_RESOURCE_WITH_ID_NOT_FOUND,
+    ERROR_USER_NOT_FOUND,
+)
 
 
 class AppException(HTTPException):
@@ -25,9 +37,15 @@ class NotFoundException(AppException):
     """Resource not found (404)."""
 
     def __init__(self, resource: str = "Resource", resource_id: int | str = "") -> None:
-        detail = f"{resource} not found"
-        if resource_id:
-            detail = f"{resource} with id '{resource_id}' not found"
+        if resource.lower() == "user" and resource_id:
+            detail = ERROR_USER_NOT_FOUND.format(user_id=resource_id)
+        elif resource_id:
+            detail = ERROR_RESOURCE_WITH_ID_NOT_FOUND.format(
+                resource=resource, resource_id=resource_id
+            )
+        else:
+            detail = ERROR_RESOURCE_NOT_FOUND.format(resource=resource)
+
         super().__init__(
             status_code=status.HTTP_404_NOT_FOUND,
             message=detail,
@@ -38,7 +56,7 @@ class NotFoundException(AppException):
 class BadRequestException(AppException):
     """Invalid request (400)."""
 
-    def __init__(self, message: str = "Bad request") -> None:
+    def __init__(self, message: str = ERROR_BAD_REQUEST) -> None:
         super().__init__(
             status_code=status.HTTP_400_BAD_REQUEST,
             message=message,
@@ -49,7 +67,7 @@ class BadRequestException(AppException):
 class ForbiddenException(AppException):
     """Insufficient permissions (403)."""
 
-    def __init__(self, message: str = "Permission denied") -> None:
+    def __init__(self, message: str = ERROR_PERMISSION_DENIED) -> None:
         super().__init__(
             status_code=status.HTTP_403_FORBIDDEN,
             message=message,
@@ -60,7 +78,7 @@ class ForbiddenException(AppException):
 class UnauthorizedException(AppException):
     """Authentication required or failed (401)."""
 
-    def __init__(self, message: str = "Not authenticated") -> None:
+    def __init__(self, message: str = ERROR_NOT_AUTHENTICATED) -> None:
         super().__init__(
             status_code=status.HTTP_401_UNAUTHORIZED,
             message=message,
@@ -71,7 +89,7 @@ class UnauthorizedException(AppException):
 class ConflictException(AppException):
     """Resource conflict, e.g. duplicate email (409)."""
 
-    def __init__(self, message: str = "Resource already exists") -> None:
+    def __init__(self, message: str = ERROR_RESOURCE_ALREADY_EXISTS) -> None:
         super().__init__(
             status_code=status.HTTP_409_CONFLICT,
             message=message,
@@ -93,11 +111,12 @@ async def app_exception_handler(request: Request, exc: AppException) -> JSONResp
 
 async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Catch-all handler for unhandled exceptions."""
+    logger.exception("Unhandled server exception: {}", exc)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={
             "error": "INTERNAL_ERROR",
-            "message": "An unexpected error occurred",
+            "message": ERROR_INTERNAL_SERVER,
             "path": str(request.url),
         },
     )
