@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from app.models.user import User
 
 
-class WorkspaceRole(str, enum.Enum):
+class WorkspaceRole(enum.StrEnum):
     """Roles within a specific workspace."""
 
     OWNER = "OWNER"
@@ -58,9 +58,7 @@ class WorkspaceMember(Base):
     workspace_id: Mapped[int] = mapped_column(
         ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
     )
-    user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
-    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     role: Mapped[WorkspaceRole] = mapped_column(
         Enum(WorkspaceRole), default=WorkspaceRole.VIEWER, nullable=False
     )
@@ -71,12 +69,9 @@ class WorkspaceMember(Base):
     )
     user: Mapped["User"] = relationship(lazy="selectin")
 
-    __table_args__ = (
-        UniqueConstraint("workspace_id", "user_id", name="uq_workspace_user"),
-    )
+    __table_args__ = (UniqueConstraint("workspace_id", "user_id", name="uq_workspace_user"),)
 
     def __repr__(self) -> str:
         return (
-            f"<WorkspaceMember workspace={self.workspace_id} "
-            f"user={self.user_id} role={self.role}>"
+            f"<WorkspaceMember workspace={self.workspace_id} user={self.user_id} role={self.role}>"
         )

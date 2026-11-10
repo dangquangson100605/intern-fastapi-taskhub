@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from app.models.workspace import Workspace
 
 
-class ProjectStatus(str, enum.Enum):
+class ProjectStatus(enum.StrEnum):
     """Project lifecycle statuses."""
 
     ACTIVE = "ACTIVE"

@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from app.models.workspace import Workspace
 
 
-class UserRole(str, enum.Enum):
+class UserRole(enum.StrEnum):
     """System-wide user roles."""
 
     ADMIN = "ADMIN"
@@ -24,14 +24,10 @@ class User(Base):
 
     __tablename__ = "users"
 
-    email: Mapped[str] = mapped_column(
-        String(255), unique=True, index=True, nullable=False
-    )
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
-    role: Mapped[UserRole] = mapped_column(
-        Enum(UserRole), default=UserRole.MEMBER, nullable=False
-    )
+    role: Mapped[UserRole] = mapped_column(Enum(UserRole), default=UserRole.MEMBER, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     owned_workspaces: Mapped[list["Workspace"]] = relationship(
