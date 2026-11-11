@@ -1,9 +1,11 @@
 """User service — business logic for user operations."""
 
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from app.core.constants import ERROR_EMAIL_ALREADY_IN_USE, ERROR_EMAIL_ALREADY_REGISTERED
 from app.core.exceptions import ConflictException, NotFoundException
+from app.core.security import hash_password
 from app.models.user import User
 from app.repositories.base import PaginationResult
 from app.repositories.user import UserRepository
@@ -18,15 +20,16 @@ class UserService:
         self.repo = repo or UserRepository(session)
 
     async def create_user(self, data: UserCreate) -> User:
-        """Register a new user (Day 1: simple version without hashing)."""
+        """Register a new user with password hashed off the event loop thread."""
         existing = await self.repo.get_by_email(data.email)
         if existing:
             raise ConflictException(ERROR_EMAIL_ALREADY_REGISTERED.format(email=data.email))
 
+        hashed = await run_in_threadpool(hash_password, data.password)
         return await self.repo.create(
             email=data.email,
             full_name=data.full_name,
-            hashed_password=data.password,
+            hashed_password=hashed,
         )
 
     async def get_user_by_id(self, user_id: int) -> User:

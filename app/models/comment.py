@@ -17,17 +17,22 @@ class Comment(Base):
 
     __tablename__ = "comments"
 
-    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False)
+    task_id: Mapped[int] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
     author_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
     )
     content: Mapped[str] = mapped_column(Text, nullable=False)
 
     task: Mapped["Task"] = relationship(
         back_populates="comments",
-        lazy="selectin",
     )
-    author: Mapped["User"] = relationship(lazy="selectin")
+    author: Mapped["User"] = relationship()
 
     def __repr__(self) -> str:
         return f"<Comment id={self.id} task={self.task_id}>"
