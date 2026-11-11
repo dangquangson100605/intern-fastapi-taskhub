@@ -7,7 +7,11 @@ __pycache__/
 dist/
 build/
 
-# Tài liệu cá nhân / Đề bài
 ke_hoach_taskhub.md
 FastAPI_Curriculum_Spec.docx
 GIAI_THICH_THUAT_NGU.md
+doc/
+docs/
+
+doc/
+docs/

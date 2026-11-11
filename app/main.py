@@ -54,22 +54,21 @@ app.add_middleware(
 )
 
 
-async def validation_exception_handler(
-    request: Request, exc: RequestValidationError
-) -> JSONResponse:
+async def validation_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Format 422 validation errors to match the uniform API error format."""
+    details = exc.errors() if isinstance(exc, RequestValidationError) else []
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content={
             "error": "VALIDATION_ERROR",
             "message": "Request validation failed",
             "path": str(request.url),
-            "details": exc.errors(),
+            "details": details,
         },
     )
 
 
-async def integrity_exception_handler(request: Request, exc: IntegrityError) -> JSONResponse:
+async def integrity_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Handle database integrity errors (unique constraint, foreign key violation)."""
     logger.warning("Database integrity constraint violated: {}", exc)
     return JSONResponse(

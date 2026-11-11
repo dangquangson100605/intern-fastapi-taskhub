@@ -97,16 +97,18 @@ class ConflictException(AppException):
         )
 
 
-async def app_exception_handler(request: Request, exc: AppException) -> JSONResponse:
+async def app_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Handle custom AppException and return consistent JSON."""
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={
-            "error": exc.error_code,
-            "message": exc.message,
-            "path": str(request.url),
-        },
-    )
+    if isinstance(exc, AppException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "error": exc.error_code,
+                "message": exc.message,
+                "path": str(request.url),
+            },
+        )
+    return await generic_exception_handler(request, exc)
 
 
 async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
