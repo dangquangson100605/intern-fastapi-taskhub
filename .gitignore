@@ -1,0 +1,17 @@
+.env
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+ke_hoach_taskhub.md
+FastAPI_Curriculum_Spec.docx
+GIAI_THICH_THUAT_NGU.md
+doc/
+docs/
+
+doc/
+docs/
