@@ -53,7 +53,6 @@ class User(Base):
         back_populates="owner",
         cascade="all, delete-orphan",
         passive_deletes=True,
-        lazy="selectin",
     )
 
     def __repr__(self) -> str:

@@ -7,7 +7,7 @@ MAX_LIMIT: int = 100
 USER_FULL_NAME_MIN_LENGTH: int = 1
 USER_FULL_NAME_MAX_LENGTH: int = 255
 USER_PASSWORD_MIN_LENGTH: int = 8
-USER_PASSWORD_MAX_LENGTH: int = 128
+USER_PASSWORD_MAX_LENGTH: int = 72
 USER_EMAIL_MAX_LENGTH: int = 255
 USER_PASSWORD_HASH_MAX_LENGTH: int = 255
 
@@ -23,6 +23,7 @@ TASK_TITLE_MAX_LENGTH: int = 500
 LABEL_NAME_MIN_LENGTH: int = 1
 LABEL_NAME_MAX_LENGTH: int = 100
 LABEL_COLOR_MAX_LENGTH: int = 7
+DEFAULT_LABEL_COLOR: str = "#3B82F6"
 
 ERROR_BAD_REQUEST: str = "Bad request"
 ERROR_PERMISSION_DENIED: str = "Permission denied"
@@ -37,6 +38,7 @@ ERROR_FIELD_CANNOT_BE_NULL: str = "Field '{field}' cannot be null"
 ERROR_DATABASE_INTEGRITY: str = (
     "Database constraint violation (duplicate entry or invalid reference)"
 )
+ERROR_FOREIGN_KEY_VIOLATION: str = "Referenced resource does not exist"
 ERROR_INTERNAL_SERVER: str = "An unexpected error occurred"
 
 SUCCESS_USER_DELETED: str = "User deleted successfully"

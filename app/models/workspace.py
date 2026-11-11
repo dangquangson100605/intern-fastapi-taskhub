@@ -31,19 +31,16 @@ class Workspace(Base):
 
     owner: Mapped["User"] = relationship(
         back_populates="owned_workspaces",
-        lazy="selectin",
     )
     members: Mapped[list["WorkspaceMember"]] = relationship(
         back_populates="workspace",
         cascade="all, delete-orphan",
         passive_deletes=True,
-        lazy="selectin",
     )
     projects: Mapped[list["Project"]] = relationship(
         back_populates="workspace",
         cascade="all, delete-orphan",
         passive_deletes=True,
-        lazy="selectin",
     )
 
     def __repr__(self) -> str:
@@ -74,9 +71,8 @@ class WorkspaceMember(Base):
 
     workspace: Mapped["Workspace"] = relationship(
         back_populates="members",
-        lazy="selectin",
     )
-    user: Mapped["User"] = relationship(lazy="selectin")
+    user: Mapped["User"] = relationship()
 
     __table_args__ = (UniqueConstraint("workspace_id", "user_id", name="uq_workspace_user"),)
 

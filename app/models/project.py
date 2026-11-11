@@ -39,19 +39,16 @@ class Project(Base):
 
     workspace: Mapped["Workspace"] = relationship(
         back_populates="projects",
-        lazy="selectin",
     )
     tasks: Mapped[list["Task"]] = relationship(
         back_populates="project",
         cascade="all, delete-orphan",
         passive_deletes=True,
-        lazy="selectin",
     )
     labels: Mapped[list["Label"]] = relationship(
         back_populates="project",
         cascade="all, delete-orphan",
         passive_deletes=True,
-        lazy="selectin",
     )
 
     def __repr__(self) -> str:

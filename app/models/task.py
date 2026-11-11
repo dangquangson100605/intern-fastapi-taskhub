@@ -54,33 +54,28 @@ class Task(Base):
         nullable=True,
     )
     created_by: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"),
+        ForeignKey("users.id", ondelete="RESTRICT"),
         index=True,
         nullable=False,
     )
 
     project: Mapped["Project"] = relationship(
         back_populates="tasks",
-        lazy="selectin",
     )
     assignee: Mapped["User | None"] = relationship(
         foreign_keys=[assignee_id],
-        lazy="selectin",
     )
     creator: Mapped["User"] = relationship(
         foreign_keys=[created_by],
-        lazy="selectin",
     )
     labels: Mapped[list["Label"]] = relationship(
         secondary="task_labels",
         back_populates="tasks",
-        lazy="selectin",
     )
     comments: Mapped[list["Comment"]] = relationship(
         back_populates="task",
         cascade="all, delete-orphan",
         passive_deletes=True,
-        lazy="selectin",
     )
 
     def __repr__(self) -> str:

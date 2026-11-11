@@ -31,12 +31,12 @@ AsyncSessionLocal = async_sessionmaker(
 class Base(DeclarativeBase):
     """Base class for all SQLAlchemy models.
 
-    Provides common columns: id, created_at.
+    Provides common columns: id, created_at (always stored as UTC).
     """
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now(),
+        DateTime,
+        server_default=func.utc_timestamp(),
         nullable=False,
     )

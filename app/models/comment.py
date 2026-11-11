@@ -31,9 +31,8 @@ class Comment(Base):
 
     task: Mapped["Task"] = relationship(
         back_populates="comments",
-        lazy="selectin",
     )
-    author: Mapped["User"] = relationship(lazy="selectin")
+    author: Mapped["User"] = relationship()
 
     def __repr__(self) -> str:
         return f"<Comment id={self.id} task={self.task_id}>"

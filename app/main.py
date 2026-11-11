@@ -16,7 +16,12 @@ from sqlalchemy.exc import IntegrityError
 
 from app.api.v1.router import api_v1_router
 from app.core.config import get_settings
-from app.core.constants import ERROR_DATABASE_INTEGRITY
+from app.core.constants import (
+    ERROR_DATABASE_INTEGRITY,
+    ERROR_FOREIGN_KEY_VIOLATION,
+    ERROR_RESOURCE_ALREADY_EXISTS,
+)
+from app.core.database import async_engine
 from app.core.exceptions import AppException, app_exception_handler, generic_exception_handler
 
 settings = get_settings()
@@ -30,6 +35,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("🔴 Redis: {}:{}", settings.REDIS_HOST, settings.REDIS_PORT)
     yield
     logger.info("🛑 Shutting down TaskHub")
+    await async_engine.dispose()
 
 
 app = FastAPI(
@@ -58,7 +64,7 @@ async def validation_exception_handler(request: Request, exc: Exception) -> JSON
     """Format 422 validation errors to match the uniform API error format."""
     details = exc.errors() if isinstance(exc, RequestValidationError) else []
     return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         content={
             "error": "VALIDATION_ERROR",
             "message": "Request validation failed",
@@ -69,12 +75,38 @@ async def validation_exception_handler(request: Request, exc: Exception) -> JSON
 
 
 async def integrity_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    """Handle database integrity errors (unique constraint, foreign key violation)."""
-    logger.warning("Database integrity constraint violated: {}", exc)
+    """Handle database integrity errors distinguishing duplicate entries and foreign keys."""
+    orig_error = getattr(exc, "orig", None)
+    logger.warning("Database integrity error: {}", orig_error or str(exc))
+
+    orig_msg = str(orig_error or exc).lower()
+    if "duplicate" in orig_msg or "1062" in orig_msg:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={
+                "error": "CONFLICT",
+                "message": ERROR_RESOURCE_ALREADY_EXISTS,
+                "path": str(request.url),
+            },
+        )
+    if (
+        "foreign key" in orig_msg
+        or "1452" in orig_msg
+        or "cannot add or update a child row" in orig_msg
+    ):
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content={
+                "error": "INVALID_REFERENCE",
+                "message": ERROR_FOREIGN_KEY_VIOLATION,
+                "path": str(request.url),
+            },
+        )
+
     return JSONResponse(
         status_code=status.HTTP_409_CONFLICT,
         content={
-            "error": "CONFLICT",
+            "error": "INTEGRITY_ERROR",
             "message": ERROR_DATABASE_INTEGRITY,
             "path": str(request.url),
         },
