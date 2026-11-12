@@ -1,6 +1,7 @@
 """Shared FastAPI dependencies using Annotated pattern."""
 
 from collections.abc import AsyncGenerator, Callable
+from datetime import UTC
 from typing import Annotated
 
 from fastapi import Depends
@@ -134,6 +135,10 @@ async def get_current_user(
         raise UnauthorizedException(ERROR_INVALID_TOKEN)
     if not user.is_active:
         raise UnauthorizedException(ERROR_INACTIVE_USER)
+    if user.password_changed_at is not None:
+        changed_ts = user.password_changed_at.replace(tzinfo=UTC).timestamp()
+        if payload.iat < changed_ts:
+            raise UnauthorizedException(ERROR_TOKEN_REVOKED)
     return user
 
 

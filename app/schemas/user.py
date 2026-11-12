@@ -13,7 +13,7 @@ from app.core.constants import (
     USER_PASSWORD_MIN_LENGTH,
 )
 from app.models.enums import UserRole
-from app.schemas.base import BaseSchema, validate_non_null, validate_password_bytes
+from app.schemas.base import BaseSchema, RawPassword, validate_non_null, validate_password_bytes
 
 
 class UserCreate(BaseSchema):
@@ -25,7 +25,7 @@ class UserCreate(BaseSchema):
         min_length=USER_FULL_NAME_MIN_LENGTH,
         max_length=USER_FULL_NAME_MAX_LENGTH,
     )
-    password: str = Field(
+    password: RawPassword = Field(
         ...,
         min_length=USER_PASSWORD_MIN_LENGTH,
         max_length=USER_PASSWORD_MAX_LENGTH,

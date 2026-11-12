@@ -16,6 +16,12 @@ DEFAULT_JWT_ALGORITHM: str = "HS256"
 BEARER_TOKEN_TYPE: str = "bearer"
 TOKEN_JTI_MAX_LENGTH: int = 36
 REDIS_BLACKLIST_PREFIX: str = "blacklist:token:"
+REDIS_SOCKET_TIMEOUT: float = 3.0
+REDIS_SOCKET_CONNECT_TIMEOUT: float = 3.0
+INSECURE_JWT_SECRET_PLACEHOLDERS: tuple[str, ...] = (
+    "CHANGE_ME",
+    "your-super-secret-key-change-in-production",
+)
 
 WORKSPACE_NAME_MIN_LENGTH: int = 1
 WORKSPACE_NAME_MAX_LENGTH: int = 255

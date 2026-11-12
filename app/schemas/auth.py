@@ -8,7 +8,7 @@ from app.core.constants import (
     USER_PASSWORD_MAX_LENGTH,
     USER_PASSWORD_MIN_LENGTH,
 )
-from app.schemas.base import BaseSchema, validate_password_bytes
+from app.schemas.base import BaseSchema, RawPassword, validate_password_bytes
 from app.schemas.user import UserCreate
 
 
@@ -20,7 +20,7 @@ class LoginRequest(BaseSchema):
     """Schema for email and password authentication."""
 
     email: EmailStr = Field(..., max_length=USER_EMAIL_MAX_LENGTH)
-    password: str = Field(..., min_length=1, max_length=USER_PASSWORD_MAX_LENGTH)
+    password: RawPassword = Field(..., min_length=1, max_length=USER_PASSWORD_MAX_LENGTH)
 
     @field_validator("password")
     @classmethod
@@ -53,8 +53,8 @@ class TokenResponse(BaseSchema):
 class ChangePasswordRequest(BaseSchema):
     """Schema for authenticated user password rotation."""
 
-    current_password: str = Field(..., min_length=1, max_length=USER_PASSWORD_MAX_LENGTH)
-    new_password: str = Field(
+    current_password: RawPassword = Field(..., min_length=1, max_length=USER_PASSWORD_MAX_LENGTH)
+    new_password: RawPassword = Field(
         ...,
         min_length=USER_PASSWORD_MIN_LENGTH,
         max_length=USER_PASSWORD_MAX_LENGTH,
@@ -65,4 +65,3 @@ class ChangePasswordRequest(BaseSchema):
     def check_password_bytes(cls, value: str) -> str:
         """Ensure passwords fit within bcrypt's 72-byte UTF-8 limit."""
         return validate_password_bytes(value)
-

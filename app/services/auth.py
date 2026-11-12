@@ -23,6 +23,7 @@ from app.core.messages import (
 )
 from app.core.redis import TokenBlacklistService
 from app.core.security import (
+    DUMMY_PASSWORD_HASH,
     TokenPayload,
     create_access_token,
     create_refresh_token,
@@ -85,13 +86,11 @@ class AuthService:
         )
 
     async def login(self, data: LoginRequest) -> TokenResponse:
-        """Authenticate credentials and issue access and refresh tokens."""
+        """Authenticate credentials with constant-time hash verification against unknown emails."""
         user = await self.user_repo.get_by_email(data.email.lower())
-        if user is None:
-            raise UnauthorizedException(ERROR_INVALID_CREDENTIALS)
-
-        is_valid = await run_in_threadpool(verify_password, data.password, user.hashed_password)
-        if not is_valid:
+        target_hash = user.hashed_password if user is not None else DUMMY_PASSWORD_HASH
+        is_valid = await run_in_threadpool(verify_password, data.password, target_hash)
+        if user is None or not is_valid:
             raise UnauthorizedException(ERROR_INVALID_CREDENTIALS)
 
         if not user.is_active:
@@ -103,11 +102,16 @@ class AuthService:
         """Atomically rotate a refresh token in one transaction with reuse detection."""
         payload = decode_token(refresh_token, expected_type=TokenType.REFRESH)
 
+        if await self.blacklist.is_blacklisted(payload.jti):
+            await self.refresh_repo.revoke_all_for_user(payload.user_id)
+            await self.session.commit()
+            raise UnauthorizedException(ERROR_REFRESH_TOKEN_REUSED)
+
         token_record = await self.refresh_repo.get_by_jti(payload.jti, for_update=True)
         if token_record is None:
             raise UnauthorizedException(ERROR_INVALID_TOKEN)
 
-        if token_record.revoked or await self.blacklist.is_blacklisted(payload.jti):
+        if token_record.revoked:
             await self.refresh_repo.revoke_all_for_user(token_record.user_id)
             await self.session.commit()
             raise UnauthorizedException(ERROR_REFRESH_TOKEN_REUSED)
@@ -152,18 +156,33 @@ class AuthService:
         access_payload: TokenPayload,
         refresh_token: str | None = None,
     ) -> None:
-        """Blacklist the access token in Redis and optionally revoke the refresh token."""
-        await self.blacklist.blacklist_token(access_payload.jti, access_payload.exp)
-
+        """Validate optional refresh token first, revoke it in DB, then blacklist tokens in Redis."""
+        refresh_payload: TokenPayload | None = None
         if refresh_token is not None:
             refresh_payload = decode_token(refresh_token, expected_type=TokenType.REFRESH)
             if refresh_payload.user_id != access_payload.user_id:
                 raise ForbiddenException(ERROR_PERMISSION_DENIED)
-            await self.refresh_repo.atomic_revoke_by_jti(refresh_payload.jti)
+
+            revoked = await self.refresh_repo.atomic_revoke_by_jti(refresh_payload.jti)
+            if not revoked:
+                existing = await self.refresh_repo.get_by_jti(refresh_payload.jti)
+                if existing is not None and existing.revoked:
+                    await self.refresh_repo.revoke_all_for_user(access_payload.user_id)
+                    await self.session.commit()
+                    raise UnauthorizedException(ERROR_REFRESH_TOKEN_REUSED)
+                raise UnauthorizedException(ERROR_INVALID_TOKEN)
+
             await self.blacklist.blacklist_token(refresh_payload.jti, refresh_payload.exp)
 
-    async def change_password(self, user: User, data: ChangePasswordRequest) -> None:
-        """Verify current password, update hash, and revoke all existing refresh tokens."""
+        await self.blacklist.blacklist_token(access_payload.jti, access_payload.exp)
+
+    async def change_password(
+        self,
+        user: User,
+        access_payload: TokenPayload,
+        data: ChangePasswordRequest,
+    ) -> None:
+        """Verify password, update hash and timestamp, and invalidate all active tokens."""
         is_valid = await run_in_threadpool(
             verify_password, data.current_password, user.hashed_password
         )
@@ -174,5 +193,11 @@ class AuthService:
             raise BadRequestException(ERROR_NEW_PASSWORD_SAME_AS_OLD)
 
         new_hashed = await run_in_threadpool(hash_password, data.new_password)
-        await self.user_repo.update(user.id, hashed_password=new_hashed)
+        changed_at = datetime.now(UTC).replace(tzinfo=None)
+        await self.user_repo.update(
+            user.id,
+            hashed_password=new_hashed,
+            password_changed_at=changed_at,
+        )
         await self.refresh_repo.revoke_all_for_user(user.id)
+        await self.blacklist.blacklist_token(access_payload.jti, access_payload.exp)

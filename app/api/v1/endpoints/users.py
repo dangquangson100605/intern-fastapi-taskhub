@@ -8,6 +8,7 @@ from app.core.constants import DEFAULT_LIMIT, DEFAULT_PAGE, MAX_LIMIT
 from app.core.dependencies import (
     AdminUser,
     AuthServiceDep,
+    CurrentTokenPayload,
     CurrentUser,
     UserServiceDep,
 )
@@ -74,10 +75,11 @@ async def update_my_profile(
 async def change_my_password(
     data: ChangePasswordRequest,
     current_user: CurrentUser,
+    token_payload: CurrentTokenPayload,
     auth_service: AuthServiceDep,
 ) -> MessageResponse:
     """Rotate password for the authenticated user and invalidate refresh sessions."""
-    await auth_service.change_password(current_user, data)
+    await auth_service.change_password(current_user, token_payload, data)
     return MessageResponse(message=SUCCESS_PASSWORD_CHANGED)
 
 

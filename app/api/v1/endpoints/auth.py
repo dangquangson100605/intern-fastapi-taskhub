@@ -7,7 +7,6 @@ from fastapi import APIRouter, Body, status
 from app.core.dependencies import (
     AuthServiceDep,
     CurrentTokenPayload,
-    CurrentUser,
 )
 from app.core.messages import SUCCESS_LOGOUT
 from app.schemas.auth import (
@@ -93,13 +92,11 @@ async def refresh_token(
     },
 )
 async def logout(
-    current_user: CurrentUser,
     token_payload: CurrentTokenPayload,
     service: AuthServiceDep,
     data: Annotated[LogoutRequest | None, Body()] = None,
 ) -> MessageResponse:
     """Invalidate the caller's active session tokens."""
-    _ = current_user
     refresh = data.refresh_token if data is not None else None
     await service.logout(access_payload=token_payload, refresh_token=refresh)
     return MessageResponse(message=SUCCESS_LOGOUT)

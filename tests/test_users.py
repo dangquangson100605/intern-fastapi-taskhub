@@ -145,6 +145,44 @@ async def test_member_update_or_delete_other_user_returns_403() -> None:
 
 
 @pytest.mark.anyio
+async def test_member_list_and_create_users_returns_403() -> None:
+    """Member attempting admin list (GET /users) or create (POST /users) must receive 403."""
+    member = _make_user(10, "member@example.com", role=UserRole.MEMBER)
+    mock_session = AsyncMock(spec=AsyncSession)
+    mock_user_repo = AsyncMock(spec=UserRepository)
+    mock_user_repo.get_by_id.return_value = member
+    mock_blacklist = AsyncMock(spec=TokenBlacklistService)
+    mock_blacklist.is_blacklisted.return_value = False
+
+    app.dependency_overrides[get_db] = lambda: mock_session
+    app.dependency_overrides[get_user_repository] = lambda: mock_user_repo
+    app.dependency_overrides[get_refresh_token_repository] = lambda: AsyncMock(
+        spec=RefreshTokenRepository
+    )
+    app.dependency_overrides[get_token_blacklist] = lambda: mock_blacklist
+
+    member_token = create_access_token(member.id, member.role)
+    headers = {"Authorization": f"Bearer {member_token}"}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as ac:
+        list_resp = await ac.get("/api/v1/users", headers=headers)
+        create_resp = await ac.post(
+            "/api/v1/users",
+            headers=headers,
+            json={
+                "email": "created_by_member@example.com",
+                "full_name": "Unauthorized Create",
+                "password": "ValidPassword123!",
+            },
+        )
+
+    assert list_resp.status_code == 403
+    assert create_resp.status_code == 403
+
+
+@pytest.mark.anyio
 async def test_admin_cannot_delete_self_returns_400() -> None:
     """An admin must not be allowed to delete their own account."""
     admin = _make_user(1, "admin@example.com", role=UserRole.ADMIN)

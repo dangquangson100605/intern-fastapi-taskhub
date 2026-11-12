@@ -15,6 +15,8 @@ from app.models.enums import TokenType, UserRole
 
 settings = get_settings()
 
+DUMMY_PASSWORD_HASH: str = "$2b$12$e2qGEOpnknvm0P3uCkZj5eHhtHm1uxyGTcCdAtBICY5NZT7K1FE7G"
+
 
 @dataclass(frozen=True)
 class TokenPayload:
@@ -24,7 +26,7 @@ class TokenPayload:
     token_type: TokenType
     jti: str
     exp: int
-    iat: int
+    iat: float
 
 
 def hash_password(password: str) -> str:
@@ -60,7 +62,7 @@ def _create_token(
         "sub": str(user_id),
         "type": token_type.value,
         "jti": jti,
-        "iat": int(now.timestamp()),
+        "iat": now.timestamp(),
         "exp": expire,
     }
     if extra_claims:
@@ -120,7 +122,7 @@ def decode_token(token: str, expected_type: TokenType) -> TokenPayload:
         if not isinstance(raw_jti, str) or not raw_jti:
             raise ValueError("Invalid jti claim")
         exp = int(payload["exp"])
-        iat = int(payload["iat"])
+        iat = float(payload["iat"])
     except (KeyError, TypeError, ValueError) as exc:
         raise UnauthorizedException(ERROR_INVALID_TOKEN) from exc
 

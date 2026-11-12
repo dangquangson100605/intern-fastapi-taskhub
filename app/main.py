@@ -25,7 +25,7 @@ from app.core.messages import (
     ERROR_FOREIGN_KEY_VIOLATION,
     ERROR_RESOURCE_ALREADY_EXISTS,
 )
-from app.core.redis import close_redis
+from app.core.redis import close_redis, ping_redis
 
 settings = get_settings()
 
@@ -36,6 +36,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("🚀 Starting TaskHub v{}", settings.APP_VERSION)
     logger.info("📦 Database: {}", settings.DB_HOST)
     logger.info("🔴 Redis: {}:{}", settings.REDIS_HOST, settings.REDIS_PORT)
+    await ping_redis()
     yield
     logger.info("🛑 Shutting down TaskHub")
     await close_redis()

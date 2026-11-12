@@ -1,8 +1,8 @@
 """Base Pydantic schema and shared field validation helpers."""
 
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, ValidationInfo
+from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationInfo
 
 from app.core.constants import USER_PASSWORD_MAX_LENGTH
 from app.core.messages import ERROR_FIELD_CANNOT_BE_NULL, ERROR_PASSWORD_TOO_LONG_BYTES
@@ -14,6 +14,9 @@ class BaseSchema(BaseModel):
     model_config = ConfigDict(
         str_strip_whitespace=True,
     )
+
+
+RawPassword = Annotated[str, StringConstraints(strip_whitespace=False)]
 
 
 def validate_password_bytes(value: str) -> str:

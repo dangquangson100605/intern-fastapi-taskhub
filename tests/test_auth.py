@@ -1,14 +1,22 @@
 """End-to-end authentication, token rotation, RBAC, and validation tests."""
 
-from collections.abc import Generator
+import asyncio
+import uuid
+from collections.abc import AsyncGenerator, Generator
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
+from unittest.mock import patch
 
 import httpx
 import pytest
 from jose import jwt
 from pydantic import ValidationError
+from redis.asyncio import Redis
+from redis.exceptions import RedisError
+from sqlalchemy import delete, text
+from sqlalchemy.dialects import mysql
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import Settings, get_settings
 from app.core.dependencies import (
@@ -17,12 +25,15 @@ from app.core.dependencies import (
     get_token_blacklist,
     get_user_repository,
 )
+from app.core.exceptions import ServiceUnavailableException
 from app.core.messages import ERROR_INACTIVE_USER
 from app.core.redis import TokenBlacklistService
+from app.core.security import DUMMY_PASSWORD_HASH, verify_password
 from app.main import app
 from app.models.enums import TokenType, UserRole
 from app.models.refresh_token import RefreshToken
 from app.models.user import User
+from app.repositories.refresh_token import RefreshTokenRepository
 
 settings = get_settings()
 
@@ -111,6 +122,7 @@ class InMemoryRefreshTokenRepository:
     def __init__(self, session: FakeAsyncSession) -> None:
         self.session = session
         self._tokens: dict[str, RefreshToken] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
         self._next_id: int = 1
 
     async def create_token(
@@ -130,11 +142,17 @@ class InMemoryRefreshTokenRepository:
             created_at=datetime.now(UTC).replace(tzinfo=None),
         )
         self._tokens[jti] = record
+        self._locks[jti] = asyncio.Lock()
         self._next_id += 1
         return record
 
     async def get_by_jti(self, jti: str, for_update: bool = False) -> RefreshToken | None:
-        _ = for_update
+        if for_update:
+            lock = self._locks.setdefault(jti, asyncio.Lock())
+            async with lock:
+                await asyncio.sleep(0)
+                return self._tokens.get(jti)
+        await asyncio.sleep(0)
         return self._tokens.get(jti)
 
     async def atomic_revoke_by_jti(
@@ -142,13 +160,16 @@ class InMemoryRefreshTokenRepository:
         jti: str,
         replaced_by_jti: str | None = None,
     ) -> bool:
-        record = self._tokens.get(jti)
-        if record is None or record.revoked:
-            return False
-        record.revoked = True
-        record.revoked_at = datetime.now(UTC).replace(tzinfo=None)
-        record.replaced_by_jti = replaced_by_jti
-        return True
+        lock = self._locks.setdefault(jti, asyncio.Lock())
+        async with lock:
+            await asyncio.sleep(0)
+            record = self._tokens.get(jti)
+            if record is None or record.revoked:
+                return False
+            record.revoked = True
+            record.revoked_at = datetime.now(UTC).replace(tzinfo=None)
+            record.replaced_by_jti = replaced_by_jti
+            return True
 
     async def revoke_all_for_user(self, user_id: int) -> int:
         count = 0
@@ -494,9 +515,319 @@ async def test_inactive_user_reports_inactive_message_on_login_and_api(
 
 
 def test_settings_rejects_empty_or_short_jwt_secret_key() -> None:
-    """Settings validation must reject empty or insufficiently short JWT_SECRET_KEY."""
+    """Settings validation must reject empty, short, or placeholder JWT_SECRET_KEY values."""
     with pytest.raises(ValidationError):
         Settings(DB_PASSWORD="test", JWT_SECRET_KEY="")
 
     with pytest.raises(ValidationError):
         Settings(DB_PASSWORD="test", JWT_SECRET_KEY="short-key")
+
+    with pytest.raises(ValidationError):
+        Settings(DB_PASSWORD="test", JWT_SECRET_KEY="CHANGE_ME")
+
+    with pytest.raises(ValidationError):
+        Settings(
+            DB_PASSWORD="test",
+            JWT_SECRET_KEY="CHANGE_ME_123456789012345678901234567890",
+        )
+
+    with pytest.raises(ValidationError):
+        Settings(
+            DB_PASSWORD="test",
+            JWT_SECRET_KEY="your-super-secret-key-change-in-production",
+        )
+
+
+@pytest.mark.anyio
+async def test_concurrent_refresh_requests_only_one_succeeds(
+    auth_ctx: AuthTestContext,
+) -> None:
+    """Two simultaneous refresh requests with the same token allow only one to succeed."""
+    _ = auth_ctx
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as ac:
+        tokens = await _register_and_login(ac)
+        r1, r2 = await asyncio.gather(
+            ac.post("/api/v1/auth/refresh", json={"refresh_token": tokens["refresh_token"]}),
+            ac.post("/api/v1/auth/refresh", json={"refresh_token": tokens["refresh_token"]}),
+        )
+
+    statuses = sorted([r1.status_code, r2.status_code])
+    assert statuses == [200, 401]
+
+
+@pytest.mark.anyio
+async def test_concurrent_refresh_rotation_is_atomic_against_real_mysql() -> None:
+    """Concurrent refresh calls against MySQL must serialize via FOR UPDATE and atomic UPDATE."""
+    engine = create_async_engine(
+        settings.DATABASE_URL,
+        connect_args={"connect_timeout": 2},
+        pool_pre_ping=True,
+    )
+    session_factory = async_sessionmaker(
+        bind=engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+    )
+    try:
+        async with session_factory() as probe_session:
+            await probe_session.execute(text("SELECT 1"))
+            await probe_session.execute(text("SELECT password_changed_at FROM users LIMIT 1"))
+            await probe_session.execute(text("SELECT jti, revoked FROM refresh_tokens LIMIT 1"))
+    except Exception as exc:
+        await engine.dispose()
+        pytest.skip(f"MySQL unavailable or schema unmigrated for concurrency test: {exc}")
+
+    async def override_get_db() -> AsyncGenerator[AsyncSession, None]:
+        async with session_factory() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    blacklist = InMemoryBlacklistService()
+    unique_email = f"concurrent-{uuid.uuid4().hex}@example.com"
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_token_blacklist] = lambda: blacklist
+
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as ac:
+            tokens = await _register_and_login(ac, email=unique_email)
+            r1, r2 = await asyncio.gather(
+                ac.post(
+                    "/api/v1/auth/refresh",
+                    json={"refresh_token": tokens["refresh_token"]},
+                ),
+                ac.post(
+                    "/api/v1/auth/refresh",
+                    json={"refresh_token": tokens["refresh_token"]},
+                ),
+            )
+        statuses = sorted([r1.status_code, r2.status_code])
+        assert statuses == [200, 401]
+    finally:
+        app.dependency_overrides.clear()
+        async with session_factory() as cleanup_session:
+            await cleanup_session.execute(delete(User).where(User.email == unique_email))
+            await cleanup_session.commit()
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_refresh_repository_sql_uses_for_update_and_atomic_where_clause() -> None:
+    """RefreshTokenRepository emits SELECT ... FOR UPDATE and atomic WHERE revoked IS false."""
+    compiled_sql: list[str] = []
+
+    class FakeResult:
+        rowcount = 1
+
+        def scalar_one_or_none(self) -> None:
+            return None
+
+    class RecordingSession:
+        async def execute(self, stmt: Any) -> FakeResult:
+            compiled = stmt.compile(dialect=mysql.dialect())
+            compiled_sql.append(str(compiled))
+            return FakeResult()
+
+    repo = RefreshTokenRepository(cast(AsyncSession, RecordingSession()))
+    await repo.get_by_jti("test-jti", for_update=True)
+    revoked = await repo.atomic_revoke_by_jti("test-jti", replaced_by_jti="next-jti")
+
+    assert revoked is True
+    assert len(compiled_sql) == 2
+    assert "FOR UPDATE" in compiled_sql[0].upper()
+    assert "UPDATE REFRESH_TOKENS" in compiled_sql[1].upper()
+    assert "REVOKED IS FALSE" in compiled_sql[1].upper()
+
+
+@pytest.mark.anyio
+async def test_login_runs_bcrypt_verify_for_unknown_email(
+    auth_ctx: AuthTestContext,
+) -> None:
+    """Login still executes bcrypt verification with dummy hash when email does not exist."""
+    _ = auth_ctx
+    with patch(
+        "app.services.auth.verify_password",
+        wraps=verify_password,
+    ) as mock_verify:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as ac:
+            resp = await ac.post(
+                "/api/v1/auth/login",
+                json={"email": "nobody@example.com", "password": "SomePassword123!"},
+            )
+
+    assert resp.status_code == 401
+    mock_verify.assert_called_once_with("SomePassword123!", DUMMY_PASSWORD_HASH)
+
+
+@pytest.mark.anyio
+async def test_logout_invalid_or_foreign_refresh_does_not_blacklist_access_token(
+    auth_ctx: AuthTestContext,
+) -> None:
+    """Invalid, already-revoked, or foreign refresh token must not blacklist access token."""
+    _ = auth_ctx
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as ac:
+        alice_tokens = await _register_and_login(ac, email="alice@example.com")
+        bob_tokens = await _register_and_login(ac, email="bob@example.com")
+        headers = {"Authorization": f"Bearer {alice_tokens['access_token']}"}
+
+        foreign_resp = await ac.post(
+            "/api/v1/auth/logout",
+            headers=headers,
+            json={"refresh_token": bob_tokens["refresh_token"]},
+        )
+        assert foreign_resp.status_code == 403
+
+        me_after_foreign = await ac.get("/api/v1/users/me", headers=headers)
+        assert me_after_foreign.status_code == 200
+
+        refresh_resp = await ac.post(
+            "/api/v1/auth/refresh",
+            json={"refresh_token": alice_tokens["refresh_token"]},
+        )
+        assert refresh_resp.status_code == 200
+
+        revoked_logout = await ac.post(
+            "/api/v1/auth/logout",
+            headers=headers,
+            json={"refresh_token": alice_tokens["refresh_token"]},
+        )
+        assert revoked_logout.status_code == 401
+
+        me_after_revoked = await ac.get("/api/v1/users/me", headers=headers)
+        assert me_after_revoked.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_change_password_invalidates_all_existing_access_tokens(
+    auth_ctx: AuthTestContext,
+) -> None:
+    """Changing password invalidates every access token issued before password_changed_at."""
+    _ = auth_ctx
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as ac:
+        first_login = await _register_and_login(ac)
+        second_login_resp = await ac.post(
+            "/api/v1/auth/login",
+            json={"email": "alice@example.com", "password": "StrongPass123!"},
+        )
+        assert second_login_resp.status_code == 200
+        second_login = second_login_resp.json()
+
+        await asyncio.sleep(0.01)
+        change_resp = await ac.patch(
+            "/api/v1/users/me/password",
+            headers={"Authorization": f"Bearer {first_login['access_token']}"},
+            json={
+                "current_password": "StrongPass123!",
+                "new_password": "BrandNewPassword123!",
+            },
+        )
+        assert change_resp.status_code == 200
+
+        me_first = await ac.get(
+            "/api/v1/users/me",
+            headers={"Authorization": f"Bearer {first_login['access_token']}"},
+        )
+        me_second = await ac.get(
+            "/api/v1/users/me",
+            headers={"Authorization": f"Bearer {second_login['access_token']}"},
+        )
+        assert me_first.status_code == 401
+        assert me_second.status_code == 401
+
+        new_login = await ac.post(
+            "/api/v1/auth/login",
+            json={"email": "alice@example.com", "password": "BrandNewPassword123!"},
+        )
+        assert new_login.status_code == 200
+        me_new = await ac.get(
+            "/api/v1/users/me",
+            headers={"Authorization": f"Bearer {new_login.json()['access_token']}"},
+        )
+        assert me_new.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_password_preserves_leading_and_trailing_spaces(
+    auth_ctx: AuthTestContext,
+) -> None:
+    """Password fields must not strip leading or trailing whitespace."""
+    _ = auth_ctx
+    spaced_password = "  SpacePass123!  "
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as ac:
+        reg = await ac.post(
+            "/api/v1/auth/register",
+            json={
+                "email": "spaced@example.com",
+                "full_name": "Spaced Password User",
+                "password": spaced_password,
+            },
+        )
+        assert reg.status_code == 201
+
+        login_trimmed = await ac.post(
+            "/api/v1/auth/login",
+            json={"email": "spaced@example.com", "password": spaced_password.strip()},
+        )
+        login_exact = await ac.post(
+            "/api/v1/auth/login",
+            json={"email": "spaced@example.com", "password": spaced_password},
+        )
+
+    assert login_trimmed.status_code == 401
+    assert login_exact.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_redis_failure_returns_503_service_unavailable(
+    auth_ctx: AuthTestContext,
+) -> None:
+    """Redis connectivity or timeout errors translate to 503 Service Unavailable."""
+
+    class FailingRedis:
+        async def setex(self, name: str, time: int, value: str) -> None:
+            _ = (name, time, value)
+            raise RedisError("Redis timeout")
+
+        async def exists(self, name: str) -> int:
+            _ = name
+            raise RedisError("Redis connection refused")
+
+    failing_blacklist = TokenBlacklistService(cast(Redis, FailingRedis()))
+
+    with pytest.raises(ServiceUnavailableException):
+        await failing_blacklist.blacklist_token("jti-1", int(datetime.now(UTC).timestamp()) + 60)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as ac:
+        tokens = await _register_and_login(ac)
+        app.dependency_overrides[get_token_blacklist] = lambda: failing_blacklist
+        me_resp = await ac.get(
+            "/api/v1/users/me",
+            headers={"Authorization": f"Bearer {tokens['access_token']}"},
+        )
+        logout_resp = await ac.post(
+            "/api/v1/auth/logout",
+            headers={"Authorization": f"Bearer {tokens['access_token']}"},
+        )
+
+    assert me_resp.status_code == 503
+    assert me_resp.json()["error"] == "SERVICE_UNAVAILABLE"
+    assert logout_resp.status_code == 503
+    assert logout_resp.json()["error"] == "SERVICE_UNAVAILABLE"

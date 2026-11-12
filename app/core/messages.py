@@ -30,6 +30,8 @@ ERROR_DATABASE_INTEGRITY: str = (
 )
 ERROR_FOREIGN_KEY_VIOLATION: str = "Referenced resource does not exist"
 ERROR_INTERNAL_SERVER: str = "An unexpected error occurred"
+ERROR_REDIS_UNAVAILABLE: str = "Authentication cache service is temporarily unavailable"
+ERROR_INSECURE_JWT_SECRET: str = "JWT_SECRET_KEY must not use a placeholder value"
 
 SUCCESS_USER_DELETED: str = "User deleted successfully"
 SUCCESS_LOGOUT: str = "Logged out successfully"

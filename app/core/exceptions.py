@@ -12,6 +12,7 @@ from app.core.messages import (
     ERROR_INTERNAL_SERVER,
     ERROR_NOT_AUTHENTICATED,
     ERROR_PERMISSION_DENIED,
+    ERROR_REDIS_UNAVAILABLE,
     ERROR_RESOURCE_ALREADY_EXISTS,
     ERROR_RESOURCE_NOT_FOUND,
     ERROR_RESOURCE_WITH_ID_NOT_FOUND,
@@ -101,6 +102,17 @@ class ConflictException(AppException):
             status_code=status.HTTP_409_CONFLICT,
             message=message,
             error_code="CONFLICT",
+        )
+
+
+class ServiceUnavailableException(AppException):
+    """Dependent infrastructure service unavailable (503)."""
+
+    def __init__(self, message: str = ERROR_REDIS_UNAVAILABLE) -> None:
+        super().__init__(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            message=message,
+            error_code="SERVICE_UNAVAILABLE",
         )
 
 
