@@ -7,11 +7,12 @@ from fastapi import HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from loguru import logger
 
-from app.core.constants import (
+from app.core.messages import (
     ERROR_BAD_REQUEST,
     ERROR_INTERNAL_SERVER,
     ERROR_NOT_AUTHENTICATED,
     ERROR_PERMISSION_DENIED,
+    ERROR_REDIS_UNAVAILABLE,
     ERROR_RESOURCE_ALREADY_EXISTS,
     ERROR_RESOURCE_NOT_FOUND,
     ERROR_RESOURCE_WITH_ID_NOT_FOUND,
@@ -27,8 +28,9 @@ class AppException(HTTPException):
         status_code: int,
         message: str,
         error_code: str = "APP_ERROR",
+        headers: dict[str, str] | None = None,
     ) -> None:
-        super().__init__(status_code=status_code, detail=message)
+        super().__init__(status_code=status_code, detail=message, headers=headers)
         self.message = message
         self.error_code = error_code
 
@@ -78,11 +80,17 @@ class ForbiddenException(AppException):
 class UnauthorizedException(AppException):
     """Authentication required or failed (401)."""
 
-    def __init__(self, message: str = ERROR_NOT_AUTHENTICATED) -> None:
+    def __init__(
+        self,
+        message: str = ERROR_NOT_AUTHENTICATED,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        auth_headers = headers if headers is not None else {"WWW-Authenticate": "Bearer"}
         super().__init__(
             status_code=status.HTTP_401_UNAUTHORIZED,
             message=message,
             error_code="UNAUTHORIZED",
+            headers=auth_headers,
         )
 
 
@@ -97,6 +105,17 @@ class ConflictException(AppException):
         )
 
 
+class ServiceUnavailableException(AppException):
+    """Dependent infrastructure service unavailable (503)."""
+
+    def __init__(self, message: str = ERROR_REDIS_UNAVAILABLE) -> None:
+        super().__init__(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            message=message,
+            error_code="SERVICE_UNAVAILABLE",
+        )
+
+
 async def app_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Handle custom AppException and return consistent JSON."""
     if isinstance(exc, AppException):
@@ -107,6 +126,7 @@ async def app_exception_handler(request: Request, exc: Exception) -> JSONRespons
                 "message": exc.message,
                 "path": str(request.url),
             },
+            headers=exc.headers,
         )
     return await generic_exception_handler(request, exc)
 

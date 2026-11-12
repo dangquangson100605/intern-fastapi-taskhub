@@ -1,8 +1,10 @@
 """User SQLAlchemy model."""
 
+from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, Enum, String
+from sqlalchemy import Boolean, DateTime, Enum, String
+from sqlalchemy.dialects.mysql import DATETIME
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.constants import (
@@ -47,6 +49,10 @@ class User(Base):
         server_default="1",
         default=True,
         nullable=False,
+    )
+    password_changed_at: Mapped[datetime | None] = mapped_column(
+        DateTime().with_variant(DATETIME(fsp=6), "mysql"),
+        nullable=True,
     )
 
     owned_workspaces: Mapped[list["Workspace"]] = relationship(

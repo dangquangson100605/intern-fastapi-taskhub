@@ -8,6 +8,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -16,13 +17,15 @@ from sqlalchemy.exc import IntegrityError
 
 from app.api.v1.router import api_v1_router
 from app.core.config import get_settings
-from app.core.constants import (
+from app.core.database import async_engine
+from app.core.exceptions import AppException, app_exception_handler, generic_exception_handler
+from app.core.messages import (
+    ERROR_CANNOT_DELETE_USER_WITH_DEPENDENCIES,
     ERROR_DATABASE_INTEGRITY,
     ERROR_FOREIGN_KEY_VIOLATION,
     ERROR_RESOURCE_ALREADY_EXISTS,
 )
-from app.core.database import async_engine
-from app.core.exceptions import AppException, app_exception_handler, generic_exception_handler
+from app.core.redis import close_redis, ping_redis
 
 settings = get_settings()
 
@@ -33,8 +36,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("🚀 Starting TaskHub v{}", settings.APP_VERSION)
     logger.info("📦 Database: {}", settings.DB_HOST)
     logger.info("🔴 Redis: {}:{}", settings.REDIS_HOST, settings.REDIS_PORT)
+    await ping_redis()
     yield
     logger.info("🛑 Shutting down TaskHub")
+    await close_redis()
     await async_engine.dispose()
 
 
@@ -62,7 +67,7 @@ app.add_middleware(
 
 async def validation_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Format 422 validation errors to match the uniform API error format."""
-    details = exc.errors() if isinstance(exc, RequestValidationError) else []
+    details = jsonable_encoder(exc.errors()) if isinstance(exc, RequestValidationError) else []
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         content={
@@ -80,12 +85,21 @@ async def integrity_exception_handler(request: Request, exc: Exception) -> JSONR
     logger.warning("Database integrity error: {}", orig_error or str(exc))
 
     orig_msg = str(orig_error or exc).lower()
-    if "duplicate" in orig_msg or "1062" in orig_msg:
+    if "duplicate" in orig_msg or "unique" in orig_msg or "1062" in orig_msg:
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
             content={
                 "error": "CONFLICT",
                 "message": ERROR_RESOURCE_ALREADY_EXISTS,
+                "path": str(request.url),
+            },
+        )
+    if "1451" in orig_msg or "cannot delete or update a parent row" in orig_msg:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={
+                "error": "CONFLICT",
+                "message": ERROR_CANNOT_DELETE_USER_WITH_DEPENDENCIES,
                 "path": str(request.url),
             },
         )
