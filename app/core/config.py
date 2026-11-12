@@ -7,7 +7,10 @@ validation — the app crashes immediately if required env vars are missing.
 from functools import lru_cache
 from urllib.parse import quote_plus
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.core.constants import DEFAULT_JWT_ALGORITHM, JWT_SECRET_KEY_MIN_LENGTH
 
 
 class Settings(BaseSettings):
@@ -43,8 +46,8 @@ class Settings(BaseSettings):
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
 
-    JWT_SECRET_KEY: str
-    JWT_ALGORITHM: str = "HS256"
+    JWT_SECRET_KEY: str = Field(..., min_length=JWT_SECRET_KEY_MIN_LENGTH)
+    JWT_ALGORITHM: str = DEFAULT_JWT_ALGORITHM
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 

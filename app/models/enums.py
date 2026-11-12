@@ -41,3 +41,10 @@ class TaskPriority(enum.StrEnum):
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
     URGENT = "URGENT"
+
+
+class TokenType(enum.StrEnum):
+    """JWT token purpose types."""
+
+    ACCESS = "access"
+    REFRESH = "refresh"

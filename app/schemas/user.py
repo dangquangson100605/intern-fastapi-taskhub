@@ -6,7 +6,6 @@ from typing import Any
 from pydantic import ConfigDict, EmailStr, Field, ValidationInfo, field_validator
 
 from app.core.constants import (
-    ERROR_FIELD_CANNOT_BE_NULL,
     USER_EMAIL_MAX_LENGTH,
     USER_FULL_NAME_MAX_LENGTH,
     USER_FULL_NAME_MIN_LENGTH,
@@ -14,11 +13,11 @@ from app.core.constants import (
     USER_PASSWORD_MIN_LENGTH,
 )
 from app.models.enums import UserRole
-from app.schemas.base import BaseSchema
+from app.schemas.base import BaseSchema, validate_non_null, validate_password_bytes
 
 
 class UserCreate(BaseSchema):
-    """Schema for user registration."""
+    """Base schema for creating a user account."""
 
     email: EmailStr = Field(..., max_length=USER_EMAIL_MAX_LENGTH)
     full_name: str = Field(
@@ -32,9 +31,21 @@ class UserCreate(BaseSchema):
         max_length=USER_PASSWORD_MAX_LENGTH,
     )
 
+    @field_validator("password")
+    @classmethod
+    def check_password_bytes(cls, value: str) -> str:
+        """Ensure password fits within bcrypt's 72-byte UTF-8 limit."""
+        return validate_password_bytes(value)
+
+
+class AdminUserCreate(UserCreate):
+    """Schema for admin user creation allowing optional role assignment."""
+
+    role: UserRole = UserRole.MEMBER
+
 
 class UserUpdate(BaseSchema):
-    """Schema for updating user profile (partial update)."""
+    """Schema for updating own user profile (partial update)."""
 
     full_name: str | None = Field(
         default=None,
@@ -47,10 +58,20 @@ class UserUpdate(BaseSchema):
     @classmethod
     def validate_non_nullable_fields(cls, value: Any, info: ValidationInfo) -> Any:
         """Prevent client from sending explicit null for non-nullable fields."""
-        if value is None:
-            field_name = info.field_name or "field"
-            raise ValueError(ERROR_FIELD_CANNOT_BE_NULL.format(field=field_name))
-        return value
+        return validate_non_null(value, info)
+
+
+class AdminUserUpdate(UserUpdate):
+    """Schema for admin updates to a user's profile, role, or active status."""
+
+    role: UserRole | None = None
+    is_active: bool | None = None
+
+    @field_validator("role", "is_active", mode="before")
+    @classmethod
+    def validate_admin_non_nullable_fields(cls, value: Any, info: ValidationInfo) -> Any:
+        """Prevent explicit null values on role or is_active."""
+        return validate_non_null(value, info)
 
 
 class UserResponse(BaseSchema):
@@ -63,4 +84,4 @@ class UserResponse(BaseSchema):
     is_active: bool
     created_at: datetime
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, str_strip_whitespace=True)
