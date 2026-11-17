@@ -22,11 +22,16 @@ from app.core.redis import TokenBlacklistService, redis_client
 from app.core.security import TokenPayload, decode_token
 from app.models.enums import TokenType, UserRole
 from app.models.user import User
+from app.repositories.project import ProjectRepository
 from app.repositories.refresh_token import RefreshTokenRepository
+from app.repositories.task import TaskRepository
 from app.repositories.user import UserRepository
 from app.repositories.workspace import WorkspaceRepository
 from app.repositories.workspace_member import WorkspaceMemberRepository
+from app.schemas.common import PaginationParams
 from app.services.auth import AuthService
+from app.services.project import ProjectService
+from app.services.task import TaskService
 from app.services.user import UserService
 from app.services.workspace import WorkspaceService
 
@@ -196,4 +201,63 @@ def get_workspace_service(
 
 
 WorkspaceServiceDep = Annotated[WorkspaceService, Depends(get_workspace_service)]
+
+PaginationDep = Annotated[PaginationParams, Depends()]
+
+
+def get_project_repository(session: SessionDep) -> ProjectRepository:
+    """Dependency: instantiate ProjectRepository with injected session."""
+    return ProjectRepository(session)
+
+
+ProjectRepoDep = Annotated[ProjectRepository, Depends(get_project_repository)]
+
+
+def get_task_repository(session: SessionDep) -> TaskRepository:
+    """Dependency: instantiate TaskRepository with injected session."""
+    return TaskRepository(session)
+
+
+TaskRepoDep = Annotated[TaskRepository, Depends(get_task_repository)]
+
+
+def get_project_service(
+    session: SessionDep,
+    project_repo: ProjectRepoDep,
+    workspace_repo: WorkspaceRepoDep,
+    member_repo: WorkspaceMemberRepoDep,
+) -> ProjectService:
+    """Dependency: instantiate ProjectService with repositories and database session."""
+    return ProjectService(
+        session=session,
+        project_repo=project_repo,
+        workspace_repo=workspace_repo,
+        member_repo=member_repo,
+    )
+
+
+ProjectServiceDep = Annotated[ProjectService, Depends(get_project_service)]
+
+
+def get_task_service(
+    session: SessionDep,
+    task_repo: TaskRepoDep,
+    project_repo: ProjectRepoDep,
+    workspace_repo: WorkspaceRepoDep,
+    member_repo: WorkspaceMemberRepoDep,
+    user_repo: UserRepoDep,
+) -> TaskService:
+    """Dependency: instantiate TaskService with repositories and database session."""
+    return TaskService(
+        session=session,
+        task_repo=task_repo,
+        project_repo=project_repo,
+        workspace_repo=workspace_repo,
+        member_repo=member_repo,
+        user_repo=user_repo,
+    )
+
+
+TaskServiceDep = Annotated[TaskService, Depends(get_task_service)]
+
 
