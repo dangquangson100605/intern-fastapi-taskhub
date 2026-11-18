@@ -99,4 +99,3 @@ class WorkspaceMemberResponse(BaseSchema):
     user: WorkspaceMemberUserResponse | None = None
 
     model_config = ConfigDict(from_attributes=True)
-

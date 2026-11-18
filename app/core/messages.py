@@ -36,9 +36,7 @@ ERROR_INSECURE_JWT_SECRET: str = "JWT_SECRET_KEY must not use a placeholder valu
 ERROR_WORKSPACE_NOT_FOUND: str = "Workspace not found"
 ERROR_WORKSPACE_MEMBER_NOT_FOUND: str = "Workspace member not found"
 ERROR_WORKSPACE_MEMBER_ALREADY_EXISTS: str = "User is already a member of this workspace"
-ERROR_CANNOT_DEMOTE_OR_REMOVE_WORKSPACE_OWNER: str = (
-    "Cannot demote or remove the workspace owner"
-)
+ERROR_CANNOT_DEMOTE_OR_REMOVE_WORKSPACE_OWNER: str = "Cannot demote or remove the workspace owner"
 ERROR_CANNOT_ASSIGN_OWNER_ROLE: str = (
     "Cannot assign OWNER role directly; transfer ownership instead"
 )

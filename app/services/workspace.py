@@ -17,7 +17,7 @@ from app.core.messages import (
 )
 from app.models.enums import UserRole, WorkspaceRole
 from app.models.user import User
-from app.models.workspace import WorkspaceMember
+from app.models.workspace import Workspace, WorkspaceMember
 from app.repositories.base import PaginationResult
 from app.repositories.user import UserRepository
 from app.repositories.workspace import WorkspaceRepository
@@ -46,6 +46,47 @@ class WorkspaceService:
         self.workspace_repo = workspace_repo
         self.member_repo = member_repo
         self.user_repo = user_repo
+
+    async def _get_workspace_or_404(self, workspace_id: int) -> Workspace:
+        """Fetch workspace by id or raise NotFoundException if absent."""
+        workspace = await self.workspace_repo.get_by_id(workspace_id)
+        if workspace is None:
+            raise NotFoundException("Workspace")
+        return workspace
+
+    async def _get_workspace_for_owner_or_admin(
+        self,
+        workspace_id: int,
+        current_user: User,
+    ) -> Workspace:
+        """Fetch workspace and verify caller is workspace OWNER or system ADMIN."""
+        workspace = await self._get_workspace_or_404(workspace_id)
+        is_owner = workspace.owner_id == current_user.id
+        is_admin = current_user.role == UserRole.ADMIN
+        if not (is_owner or is_admin):
+            raise ForbiddenException(ERROR_PERMISSION_DENIED)
+        return workspace
+
+    async def _get_workspace_for_member_or_admin(
+        self,
+        workspace_id: int,
+        current_user: User,
+    ) -> tuple[Workspace, WorkspaceRole | None]:
+        """Fetch workspace and verify caller is a workspace member or system ADMIN."""
+        workspace = await self._get_workspace_or_404(workspace_id)
+        member = await self.member_repo.get_member(workspace_id, current_user.id)
+        if current_user.role == UserRole.ADMIN:
+            user_role = (
+                member.role
+                if member is not None
+                else (WorkspaceRole.OWNER if workspace.owner_id == current_user.id else None)
+            )
+            return workspace, user_role
+
+        if member is None:
+            raise ForbiddenException(ERROR_PERMISSION_DENIED)
+
+        return workspace, member.role
 
     async def create_workspace(
         self,
@@ -77,35 +118,13 @@ class WorkspaceService:
         workspace_id: int,
         current_user: User,
     ) -> WorkspaceResponse:
-        """Retrieve workspace details verifying that the caller has membership or admin rights."""
-        workspace = await self.workspace_repo.get_by_id(workspace_id)
-        if workspace is None:
-            raise NotFoundException("Workspace")
-
-        if current_user.role == UserRole.ADMIN:
-            member = await self.member_repo.get_member(workspace_id, current_user.id)
-            user_role = (
-                member.role
-                if member is not None
-                else (WorkspaceRole.OWNER if workspace.owner_id == current_user.id else None)
-            )
-            return WorkspaceResponse(
-                id=workspace.id,
-                name=workspace.name,
-                owner_id=workspace.owner_id,
-                role=user_role,
-                created_at=workspace.created_at,
-            )
-
-        member = await self.member_repo.get_member(workspace_id, current_user.id)
-        if member is None:
-            raise ForbiddenException(ERROR_PERMISSION_DENIED)
-
+        """Retrieve workspace details verifying caller membership or admin rights."""
+        workspace, role = await self._get_workspace_for_member_or_admin(workspace_id, current_user)
         return WorkspaceResponse(
             id=workspace.id,
             name=workspace.name,
             owner_id=workspace.owner_id,
-            role=member.role,
+            role=role,
             created_at=workspace.created_at,
         )
 
@@ -123,10 +142,18 @@ class WorkspaceService:
                 current_user.id, page=page, limit=limit
             )
 
+        ws_ids = [ws.id for ws in paginated.items]
+        roles_map = await self.member_repo.get_roles_by_workspace_ids(ws_ids, current_user.id)
+
         responses: list[WorkspaceResponse] = []
         for ws in paginated.items:
-            member = await self.member_repo.get_member(ws.id, current_user.id)
-            user_role = member.role if member is not None else None
+            user_role = roles_map.get(ws.id)
+            if (
+                user_role is None
+                and current_user.role == UserRole.ADMIN
+                and ws.owner_id == current_user.id
+            ):
+                user_role = WorkspaceRole.OWNER
             responses.append(
                 WorkspaceResponse(
                     id=ws.id,
@@ -152,14 +179,7 @@ class WorkspaceService:
         data: WorkspaceUpdate,
     ) -> WorkspaceResponse:
         """Update workspace details only if the caller is the OWNER or system ADMIN."""
-        workspace = await self.workspace_repo.get_by_id(workspace_id)
-        if workspace is None:
-            raise NotFoundException("Workspace")
-
-        is_owner = workspace.owner_id == current_user.id
-        is_admin = current_user.role == UserRole.ADMIN
-        if not (is_owner or is_admin):
-            raise ForbiddenException(ERROR_PERMISSION_DENIED)
+        workspace = await self._get_workspace_for_owner_or_admin(workspace_id, current_user)
 
         if data.name is not None:
             workspace.name = data.name
@@ -168,7 +188,11 @@ class WorkspaceService:
         await self.session.refresh(workspace)
 
         member = await self.member_repo.get_member(workspace_id, current_user.id)
-        user_role = member.role if member is not None else (WorkspaceRole.OWNER if is_owner else None)
+        user_role = (
+            member.role
+            if member is not None
+            else (WorkspaceRole.OWNER if workspace.owner_id == current_user.id else None)
+        )
         return WorkspaceResponse(
             id=workspace.id,
             name=workspace.name,
@@ -183,15 +207,7 @@ class WorkspaceService:
         current_user: User,
     ) -> None:
         """Delete a workspace only if the caller is the OWNER or system ADMIN."""
-        workspace = await self.workspace_repo.get_by_id(workspace_id)
-        if workspace is None:
-            raise NotFoundException("Workspace")
-
-        is_owner = workspace.owner_id == current_user.id
-        is_admin = current_user.role == UserRole.ADMIN
-        if not (is_owner or is_admin):
-            raise ForbiddenException(ERROR_PERMISSION_DENIED)
-
+        await self._get_workspace_for_owner_or_admin(workspace_id, current_user)
         await self.workspace_repo.delete(workspace_id)
         await self.session.commit()
 
@@ -203,15 +219,7 @@ class WorkspaceService:
         limit: int = 20,
     ) -> PaginationResult[WorkspaceMember]:
         """List workspace members ensuring caller is a member or system ADMIN."""
-        workspace = await self.workspace_repo.get_by_id(workspace_id)
-        if workspace is None:
-            raise NotFoundException("Workspace")
-
-        if current_user.role != UserRole.ADMIN:
-            member = await self.member_repo.get_member(workspace_id, current_user.id)
-            if member is None:
-                raise ForbiddenException(ERROR_PERMISSION_DENIED)
-
+        await self._get_workspace_for_member_or_admin(workspace_id, current_user)
         return await self.member_repo.list_members(workspace_id, page=page, limit=limit)
 
     async def add_member(
@@ -221,14 +229,7 @@ class WorkspaceService:
         data: WorkspaceMemberAdd,
     ) -> WorkspaceMember:
         """Add a member to a workspace enforcing OWNER/ADMIN authorization and duplicate checks."""
-        workspace = await self.workspace_repo.get_by_id(workspace_id)
-        if workspace is None:
-            raise NotFoundException("Workspace")
-
-        is_owner = workspace.owner_id == current_user.id
-        is_admin = current_user.role == UserRole.ADMIN
-        if not (is_owner or is_admin):
-            raise ForbiddenException(ERROR_PERMISSION_DENIED)
+        await self._get_workspace_for_owner_or_admin(workspace_id, current_user)
 
         target_user = await self.user_repo.get_by_id(data.user_id)
         if target_user is None:
@@ -260,21 +261,14 @@ class WorkspaceService:
         data: WorkspaceMemberUpdate,
     ) -> WorkspaceMember:
         """Update a member's role preventing OWNER demotion and unauthorized changes."""
-        workspace = await self.workspace_repo.get_by_id(workspace_id)
-        if workspace is None:
-            raise NotFoundException("Workspace")
+        workspace = await self._get_workspace_for_owner_or_admin(workspace_id, current_user)
 
-        is_owner = workspace.owner_id == current_user.id
-        is_admin = current_user.role == UserRole.ADMIN
-        if not (is_owner or is_admin):
-            raise ForbiddenException(ERROR_PERMISSION_DENIED)
+        if workspace.owner_id == target_user_id:
+            raise BadRequestException(ERROR_CANNOT_DEMOTE_OR_REMOVE_WORKSPACE_OWNER)
 
         target_member = await self.member_repo.get_member(workspace_id, target_user_id)
         if target_member is None:
             raise NotFoundException("Workspace member")
-
-        if workspace.owner_id == target_user_id:
-            raise BadRequestException(ERROR_CANNOT_DEMOTE_OR_REMOVE_WORKSPACE_OWNER)
 
         updated = await self.member_repo.update_role(
             workspace_id=workspace_id,
@@ -293,10 +287,14 @@ class WorkspaceService:
         target_user_id: int,
         current_user: User,
     ) -> None:
-        """Remove a member ensuring owner protection and proper authorization."""
-        workspace = await self.workspace_repo.get_by_id(workspace_id)
-        if workspace is None:
-            raise NotFoundException("Workspace")
+        """Remove a member ensuring owner protection, caller permission, and no member enumeration."""
+        workspace = await self._get_workspace_or_404(workspace_id)
+
+        is_owner = workspace.owner_id == current_user.id
+        is_admin = current_user.role == UserRole.ADMIN
+        is_self = current_user.id == target_user_id
+        if not (is_owner or is_admin or is_self):
+            raise ForbiddenException(ERROR_PERMISSION_DENIED)
 
         target_member = await self.member_repo.get_member(workspace_id, target_user_id)
         if target_member is None:
@@ -304,12 +302,6 @@ class WorkspaceService:
 
         if workspace.owner_id == target_user_id:
             raise BadRequestException(ERROR_CANNOT_DEMOTE_OR_REMOVE_WORKSPACE_OWNER)
-
-        is_owner = workspace.owner_id == current_user.id
-        is_admin = current_user.role == UserRole.ADMIN
-        is_self = current_user.id == target_user_id
-        if not (is_owner or is_admin or is_self):
-            raise ForbiddenException(ERROR_PERMISSION_DENIED)
 
         await self.member_repo.remove_member(workspace_id, target_user_id)
         await self.session.commit()

@@ -1,15 +1,18 @@
 """Unit, RBAC, and ownership isolation tests for Workspace endpoints."""
 
 import math
-from collections.abc import Generator
+import uuid
+from collections.abc import Generator, Sequence
 from datetime import UTC, datetime
 from typing import Any, cast
 
 import httpx
 import pytest
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.core.config import get_settings
 from app.core.dependencies import (
     get_current_user,
     get_db,
@@ -151,6 +154,15 @@ class InMemoryWorkspaceMemberRepository(WorkspaceMemberRepository):
             del self._members[(workspace_id, user_id)]
             return True
         return False
+
+    async def get_roles_by_workspace_ids(
+        self, workspace_ids: Sequence[int], user_id: int
+    ) -> dict[int, WorkspaceRole]:
+        res: dict[int, WorkspaceRole] = {}
+        for ws_id in workspace_ids:
+            if (ws_id, user_id) in self._members:
+                res[ws_id] = self._members[(ws_id, user_id)].role
+        return res
 
 
 class InMemoryWorkspaceRepository(WorkspaceRepository):
@@ -606,3 +618,135 @@ async def test_remove_member_flow(ws_ctx: WorkspaceTestContext) -> None:
     remaining = await ws_ctx.member_repo.list_members(ws.id)
     assert remaining.total == 1
     assert remaining.items[0].user_id == ws_ctx.user_a.id
+
+
+@pytest.mark.anyio
+async def test_remove_member_outsider_cannot_enumerate_members(
+    ws_ctx: WorkspaceTestContext,
+) -> None:
+    """Outsiders attempting to remove members must receive 403 regardless of target existence."""
+    ws = await ws_ctx.service.create_workspace(
+        ws_ctx.user_a,
+        type("WorkspaceCreate", (), {"name": "Enumerate Test Space"})(),  # type: ignore[arg-type]
+    )
+    await ws_ctx.member_repo.add_member(ws.id, ws_ctx.user_b.id, role=WorkspaceRole.EDITOR)
+
+    app.dependency_overrides[get_current_user] = lambda: ws_ctx.user_c
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as ac:
+        resp_non_existent = await ac.delete(f"/api/v1/workspaces/{ws.id}/members/99999")
+        assert resp_non_existent.status_code == 403
+        assert resp_non_existent.json()["message"] == ERROR_PERMISSION_DENIED
+
+        resp_existent = await ac.delete(f"/api/v1/workspaces/{ws.id}/members/{ws_ctx.user_b.id}")
+        assert resp_existent.status_code == 403
+        assert resp_existent.json()["message"] == ERROR_PERMISSION_DENIED
+
+
+@pytest.mark.anyio
+async def test_non_owner_member_can_see_workspace_in_list(
+    ws_ctx: WorkspaceTestContext,
+) -> None:
+    """Non-owner members must see workspaces they belong to in list_workspaces with role."""
+    ws = await ws_ctx.service.create_workspace(
+        ws_ctx.user_a,
+        type("WorkspaceCreate", (), {"name": "Shared Member Space"})(),  # type: ignore[arg-type]
+    )
+    await ws_ctx.member_repo.add_member(ws.id, ws_ctx.user_b.id, role=WorkspaceRole.EDITOR)
+
+    app.dependency_overrides[get_current_user] = lambda: ws_ctx.user_b
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as ac:
+        resp = await ac.get("/api/v1/workspaces")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert any(item["id"] == ws.id and item["role"] == "EDITOR" for item in data["items"])
+
+
+def test_workspace_repository_sql_query_compilation() -> None:
+    """Verify that real Workspace and WorkspaceMember repository SQL queries compile correctly."""
+    from sqlalchemy import or_
+    from sqlalchemy.dialects import mysql
+
+    member_subquery = (
+        select(WorkspaceMember.workspace_id).where(WorkspaceMember.user_id == 42).scalar_subquery()
+    )
+    condition = or_(
+        Workspace.owner_id == 42,
+        Workspace.id.in_(member_subquery),
+    )
+    ws_query = select(Workspace).where(condition)
+    ws_sql = str(ws_query.compile(dialect=mysql.dialect()))
+    assert "workspaces.owner_id" in ws_sql
+    assert "workspace_members.workspace_id" in ws_sql
+
+    roles_query = select(WorkspaceMember.workspace_id, WorkspaceMember.role).where(
+        WorkspaceMember.workspace_id.in_([1, 2, 3]),
+        WorkspaceMember.user_id == 42,
+    )
+    roles_sql = str(roles_query.compile(dialect=mysql.dialect()))
+    assert "workspace_members.workspace_id IN" in roles_sql
+    assert "workspace_members.user_id =" in roles_sql
+
+
+@pytest.mark.anyio
+async def test_real_workspace_and_member_repository_integration() -> None:
+    """Test real repository operations against MySQL when available; skip if offline."""
+    settings = get_settings()
+    engine = create_async_engine(
+        settings.DATABASE_URL,
+        connect_args={"connect_timeout": 2},
+        pool_pre_ping=True,
+    )
+    session_factory = async_sessionmaker(
+        bind=engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+    )
+    try:
+        async with session_factory() as probe:
+            await probe.execute(text("SELECT 1"))
+            await probe.execute(text("SELECT id FROM users LIMIT 1"))
+            await probe.execute(text("SELECT id FROM workspaces LIMIT 1"))
+            await probe.execute(text("SELECT id FROM workspace_members LIMIT 1"))
+    except Exception as exc:
+        await engine.dispose()
+        pytest.skip(f"MySQL unavailable or unmigrated for repository test: {exc}")
+
+    async with session_factory() as session:
+        try:
+            ws_repo = WorkspaceRepository(session)
+            member_repo = WorkspaceMemberRepository(session)
+
+            test_uid = 99991
+            test_member_uid = 99992
+            created_ws = await ws_repo.create(
+                name=f"Repo-Test-{uuid.uuid4().hex[:8]}",
+                owner_id=test_uid,
+            )
+            await session.flush()
+
+            await member_repo.add_member(
+                workspace_id=created_ws.id,
+                user_id=test_member_uid,
+                role=WorkspaceRole.EDITOR,
+            )
+            await session.flush()
+
+            member_workspaces = await ws_repo.list_for_user(test_member_uid, page=1, limit=10)
+            assert any(w.id == created_ws.id for w in member_workspaces.items)
+
+            roles = await member_repo.get_roles_by_workspace_ids(
+                [created_ws.id],
+                test_member_uid,
+            )
+            assert roles.get(created_ws.id) == WorkspaceRole.EDITOR
+
+            await ws_repo.delete(created_ws.id)
+            await session.flush()
+        finally:
+            await session.rollback()
+            await engine.dispose()

@@ -52,9 +52,7 @@ async def list_workspaces(
     current_user: CurrentUser,
     service: WorkspaceServiceDep,
     page: int = Query(default=DEFAULT_PAGE, ge=1, description="Page number"),
-    limit: int = Query(
-        default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT, description="Items per page"
-    ),
+    limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT, description="Items per page"),
 ) -> PaginatedResponse[WorkspaceResponse]:
     """List workspaces accessible to caller."""
     return await service.list_workspaces(current_user=current_user, page=page, limit=limit)
@@ -147,9 +145,7 @@ async def list_workspace_members(
     current_user: CurrentUser,
     service: WorkspaceServiceDep,
     page: int = Query(default=DEFAULT_PAGE, ge=1, description="Page number"),
-    limit: int = Query(
-        default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT, description="Items per page"
-    ),
+    limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT, description="Items per page"),
 ) -> PaginatedResponse[WorkspaceMemberResponse]:
     """List members of a workspace."""
     result = await service.list_members(

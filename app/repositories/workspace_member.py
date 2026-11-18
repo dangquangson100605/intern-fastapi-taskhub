@@ -1,6 +1,7 @@
 """WorkspaceMember repository managing membership records and roles."""
 
 import math
+from collections.abc import Sequence
 from typing import Any, cast
 
 from sqlalchemy import delete, func, select
@@ -116,15 +117,17 @@ class WorkspaceMemberRepository(BaseRepository[WorkspaceMember]):
         await self.session.flush()
         return (result.rowcount or 0) > 0
 
-    async def count_by_role(
+    async def get_roles_by_workspace_ids(
         self,
-        workspace_id: int,
-        role: WorkspaceRole,
-    ) -> int:
-        """Count how many members possess the specified role in a workspace."""
-        query = select(func.count(WorkspaceMember.id)).where(
-            WorkspaceMember.workspace_id == workspace_id,
-            WorkspaceMember.role == role,
+        workspace_ids: Sequence[int],
+        user_id: int,
+    ) -> dict[int, WorkspaceRole]:
+        """Batch-fetch member roles for given workspaces in a single query."""
+        if not workspace_ids:
+            return {}
+        query = select(WorkspaceMember.workspace_id, WorkspaceMember.role).where(
+            WorkspaceMember.workspace_id.in_(workspace_ids),
+            WorkspaceMember.user_id == user_id,
         )
         result = await self.session.execute(query)
-        return result.scalar() or 0
+        return {ws_id: role for ws_id, role in result.all()}
