@@ -41,8 +41,6 @@ ERROR_CANNOT_ASSIGN_OWNER_ROLE: str = (
     "Cannot assign OWNER role directly; transfer ownership instead"
 )
 
-ERROR_PROJECT_NOT_FOUND: str = "Project not found"
-ERROR_TASK_NOT_FOUND: str = "Task not found"
 ERROR_PROJECT_ARCHIVED: str = "Project is archived and cannot be modified"
 ERROR_PROJECT_ALREADY_ARCHIVED: str = "Project is already archived"
 ERROR_PROJECT_ALREADY_ACTIVE: str = "Project is already active"
@@ -55,6 +53,4 @@ SUCCESS_PASSWORD_CHANGED: str = "Password updated successfully"
 SUCCESS_WORKSPACE_DELETED: str = "Workspace deleted successfully"
 SUCCESS_WORKSPACE_MEMBER_REMOVED: str = "Member removed from workspace successfully"
 SUCCESS_PROJECT_DELETED: str = "Project deleted successfully"
-SUCCESS_PROJECT_ARCHIVED: str = "Project archived successfully"
-SUCCESS_PROJECT_UNARCHIVED: str = "Project unarchived successfully"
 SUCCESS_TASK_DELETED: str = "Task deleted successfully"

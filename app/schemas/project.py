@@ -5,7 +5,11 @@ from typing import Any
 
 from pydantic import ConfigDict, Field, ValidationInfo, field_validator
 
-from app.core.constants import PROJECT_NAME_MAX_LENGTH, PROJECT_NAME_MIN_LENGTH
+from app.core.constants import (
+    DESCRIPTION_MAX_LENGTH,
+    PROJECT_NAME_MAX_LENGTH,
+    PROJECT_NAME_MIN_LENGTH,
+)
 from app.models.enums import ProjectStatus
 from app.schemas.base import BaseSchema, validate_non_null
 
@@ -18,7 +22,7 @@ class ProjectCreate(BaseSchema):
         min_length=PROJECT_NAME_MIN_LENGTH,
         max_length=PROJECT_NAME_MAX_LENGTH,
     )
-    description: str | None = Field(default=None)
+    description: str | None = Field(default=None, max_length=DESCRIPTION_MAX_LENGTH)
 
 
 class ProjectUpdate(BaseSchema):
@@ -29,7 +33,7 @@ class ProjectUpdate(BaseSchema):
         min_length=PROJECT_NAME_MIN_LENGTH,
         max_length=PROJECT_NAME_MAX_LENGTH,
     )
-    description: str | None = Field(default=None)
+    description: str | None = Field(default=None, max_length=DESCRIPTION_MAX_LENGTH)
 
     @field_validator("name")
     @classmethod

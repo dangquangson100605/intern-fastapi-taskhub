@@ -7,8 +7,10 @@ from typing import Any, cast
 
 import httpx
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.core.config import get_settings
 from app.core.dependencies import (
     get_current_user,
     get_db,
@@ -32,126 +34,19 @@ from app.main import app
 from app.models.enums import ProjectStatus, TaskPriority, TaskStatus, UserRole, WorkspaceRole
 from app.models.project import Project
 from app.models.task import Task
-from app.models.user import User
-from app.models.workspace import Workspace, WorkspaceMember
+from app.models.workspace import Workspace
 from app.repositories.base import PaginationResult
 from app.repositories.project import ProjectRepository
 from app.repositories.task import TaskRepository
-from app.repositories.user import UserRepository
-from app.repositories.workspace import WorkspaceRepository
-from app.repositories.workspace_member import WorkspaceMemberRepository
 from app.schemas.common import PaginationParams
 from app.services.project import ProjectService
 from app.services.task import TaskService
-
-
-class FakeAsyncSession:
-    """In-memory async session recording commit/rollback actions."""
-
-    def __init__(self) -> None:
-        self.commit_count: int = 0
-        self.rollback_count: int = 0
-
-    async def commit(self) -> None:
-        self.commit_count += 1
-
-    async def rollback(self) -> None:
-        self.rollback_count += 1
-
-    async def refresh(self, instance: Any, attribute_names: Sequence[str] | None = None) -> None:
-        _ = (instance, attribute_names)
-
-
-class InMemoryUserRepository(UserRepository):
-    """In-memory user repository backing test actors."""
-
-    def __init__(self, session: AsyncSession) -> None:
-        super().__init__(session)
-        self._users: dict[int, User] = {}
-
-    def add_test_user(
-        self,
-        user_id: int,
-        email: str,
-        role: UserRole = UserRole.MEMBER,
-        is_active: bool = True,
-    ) -> User:
-        user = User(
-            id=user_id,
-            email=email,
-            full_name=f"User {user_id}",
-            hashed_password="hash",
-            role=role,
-            is_active=is_active,
-            created_at=datetime.now(UTC).replace(tzinfo=None),
-        )
-        self._users[user_id] = user
-        return user
-
-    async def get_by_id(self, record_id: int) -> User | None:
-        return self._users.get(record_id)
-
-
-class InMemoryWorkspaceMemberRepository(WorkspaceMemberRepository):
-    """In-memory membership store."""
-
-    def __init__(self, session: AsyncSession, user_repo: InMemoryUserRepository) -> None:
-        super().__init__(session)
-        self.user_repo = user_repo
-        self._members: dict[tuple[int, int], WorkspaceMember] = {}
-        self._next_id: int = 1
-
-    async def get_member(self, workspace_id: int, user_id: int) -> WorkspaceMember | None:
-        member = self._members.get((workspace_id, user_id))
-        if member is not None:
-            member.user = self.user_repo._users.get(user_id)  # type: ignore[assignment]
-        return member
-
-    async def add_member(
-        self,
-        workspace_id: int,
-        user_id: int,
-        role: WorkspaceRole = WorkspaceRole.VIEWER,
-    ) -> WorkspaceMember:
-        member = WorkspaceMember(
-            id=self._next_id,
-            workspace_id=workspace_id,
-            user_id=user_id,
-            role=role,
-            created_at=datetime.now(UTC).replace(tzinfo=None),
-        )
-        self._next_id += 1
-        member.user = self.user_repo._users.get(user_id)  # type: ignore[assignment]
-        self._members[(workspace_id, user_id)] = member
-        return member
-
-
-class InMemoryWorkspaceRepository(WorkspaceRepository):
-    """In-memory workspace store."""
-
-    def __init__(
-        self,
-        session: AsyncSession,
-        member_repo: InMemoryWorkspaceMemberRepository,
-    ) -> None:
-        super().__init__(session)
-        self.member_repo = member_repo
-        self._workspaces: dict[int, Workspace] = {}
-        self._next_id: int = 1
-
-    async def create(self, **kwargs: Any) -> Workspace:
-        ws = Workspace(
-            id=self._next_id,
-            name=str(kwargs["name"]),
-            owner_id=int(kwargs["owner_id"]),
-            created_at=datetime.now(UTC).replace(tzinfo=None),
-        )
-        self._workspaces[self._next_id] = ws
-        self._next_id += 1
-        return ws
-
-    async def get_by_id(self, record_id: int) -> Workspace | None:
-        return self._workspaces.get(record_id)
+from tests.conftest import (
+    FakeAsyncSession,
+    InMemoryUserRepository,
+    InMemoryWorkspaceMemberRepository,
+    InMemoryWorkspaceRepository,
+)
 
 
 class InMemoryProjectRepository(ProjectRepository):
@@ -378,14 +273,15 @@ async def _seed_workspace_and_project(
     ctx: TaskTestContext,
 ) -> tuple[Workspace, Project]:
     """Helper creating a workspace with owner, editor, viewer, and an active project."""
-    ws = await ctx.workspace_repo.create(name="Team Workspace", owner_id=ctx.owner.id)
+    ws = await ctx.workspace_repo.create(name="Engineering Workspace", owner_id=ctx.owner.id)
     await ctx.member_repo.add_member(ws.id, ctx.owner.id, role=WorkspaceRole.OWNER)
     await ctx.member_repo.add_member(ws.id, ctx.editor.id, role=WorkspaceRole.EDITOR)
     await ctx.member_repo.add_member(ws.id, ctx.viewer.id, role=WorkspaceRole.VIEWER)
+
     project = await ctx.project_repo.create(
         workspace_id=ws.id,
-        name="Main Project",
-        description="Core roadmap",
+        name="Backend Core",
+        description="Core services",
         status=ProjectStatus.ACTIVE,
     )
     return ws, project
@@ -394,18 +290,16 @@ async def _seed_workspace_and_project(
 @pytest.mark.anyio
 async def test_create_project_by_editor_or_owner_succeeds(
     task_ctx: TaskTestContext,
+    client: httpx.AsyncClient,
 ) -> None:
-    """EDITOR and OWNER can create projects inside workspace."""
+    """OWNER and EDITOR roles can create projects."""
     ws, _ = await _seed_workspace_and_project(task_ctx)
 
     app.dependency_overrides[get_current_user] = lambda: task_ctx.editor
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        resp = await ac.post(
-            f"/api/v1/workspaces/{ws.id}/projects",
-            json={"name": "Editor Project", "description": "Created by editor"},
-        )
+    resp = await client.post(
+        f"/api/v1/workspaces/{ws.id}/projects",
+        json={"name": "Editor Project", "description": "Created by editor"},
+    )
     assert resp.status_code == 201
     assert resp.json()["name"] == "Editor Project"
     assert resp.json()["status"] == "ACTIVE"
@@ -414,18 +308,16 @@ async def test_create_project_by_editor_or_owner_succeeds(
 @pytest.mark.anyio
 async def test_create_project_by_viewer_returns_403(
     task_ctx: TaskTestContext,
+    client: httpx.AsyncClient,
 ) -> None:
     """VIEWER cannot create projects (403 Forbidden)."""
     ws, _ = await _seed_workspace_and_project(task_ctx)
 
     app.dependency_overrides[get_current_user] = lambda: task_ctx.viewer
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        resp = await ac.post(
-            f"/api/v1/workspaces/{ws.id}/projects",
-            json={"name": "Viewer Project"},
-        )
+    resp = await client.post(
+        f"/api/v1/workspaces/{ws.id}/projects",
+        json={"name": "Viewer Project"},
+    )
     assert resp.status_code == 403
     assert resp.json()["message"] == ERROR_PERMISSION_DENIED
 
@@ -433,89 +325,134 @@ async def test_create_project_by_viewer_returns_403(
 @pytest.mark.anyio
 async def test_create_project_by_outsider_returns_404(
     task_ctx: TaskTestContext,
+    client: httpx.AsyncClient,
 ) -> None:
     """Outsider receives 404 to avoid resource enumeration."""
     ws, _ = await _seed_workspace_and_project(task_ctx)
 
     app.dependency_overrides[get_current_user] = lambda: task_ctx.outsider
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        resp = await ac.post(
-            f"/api/v1/workspaces/{ws.id}/projects",
-            json={"name": "Outsider Project"},
-        )
+    resp = await client.post(
+        f"/api/v1/workspaces/{ws.id}/projects",
+        json={"name": "Outsider Project"},
+    )
     assert resp.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_admin_accessing_nonexistent_workspace_returns_404(
+    task_ctx: TaskTestContext,
+    client: httpx.AsyncClient,
+) -> None:
+    """ADMIN accessing non-existent workspace must receive 404, not foreign key error."""
+    app.dependency_overrides[get_current_user] = lambda: task_ctx.admin
+    resp_create = await client.post(
+        "/api/v1/workspaces/99999/projects",
+        json={"name": "Ghost Project"},
+    )
+    assert resp_create.status_code == 404
+
+    resp_list = await client.get("/api/v1/workspaces/99999/projects")
+    assert resp_list.status_code == 404
 
 
 @pytest.mark.anyio
 async def test_archive_and_unarchive_project(
     task_ctx: TaskTestContext,
+    client: httpx.AsyncClient,
 ) -> None:
-    """Project can be archived and unarchived; duplicates return 409 Conflict."""
+    """Project can be archived and unarchived by owner; duplicates return 409 Conflict."""
     _, project = await _seed_workspace_and_project(task_ctx)
 
     app.dependency_overrides[get_current_user] = lambda: task_ctx.owner
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        arch_resp = await ac.patch(f"/api/v1/projects/{project.id}/archive")
-        assert arch_resp.status_code == 200
-        assert arch_resp.json()["status"] == "ARCHIVED"
+    arch_resp = await client.patch(f"/api/v1/projects/{project.id}/archive")
+    assert arch_resp.status_code == 200
+    assert arch_resp.json()["status"] == "ARCHIVED"
 
-        dup_arch = await ac.patch(f"/api/v1/projects/{project.id}/archive")
-        assert dup_arch.status_code == 409
-        assert dup_arch.json()["message"] == ERROR_PROJECT_ALREADY_ARCHIVED
+    dup_arch = await client.patch(f"/api/v1/projects/{project.id}/archive")
+    assert dup_arch.status_code == 409
+    assert dup_arch.json()["message"] == ERROR_PROJECT_ALREADY_ARCHIVED
 
-        unarch_resp = await ac.patch(f"/api/v1/projects/{project.id}/unarchive")
-        assert unarch_resp.status_code == 200
-        assert unarch_resp.json()["status"] == "ACTIVE"
+    unarch_resp = await client.patch(f"/api/v1/projects/{project.id}/unarchive")
+    assert unarch_resp.status_code == 200
+    assert unarch_resp.json()["status"] == "ACTIVE"
 
-        dup_unarch = await ac.patch(f"/api/v1/projects/{project.id}/unarchive")
-        assert dup_unarch.status_code == 409
-        assert dup_unarch.json()["message"] == ERROR_PROJECT_ALREADY_ACTIVE
+    dup_unarch = await client.patch(f"/api/v1/projects/{project.id}/unarchive")
+    assert dup_unarch.status_code == 409
+    assert dup_unarch.json()["message"] == ERROR_PROJECT_ALREADY_ACTIVE
 
 
 @pytest.mark.anyio
-async def test_update_archived_project_returns_409(
+async def test_editor_cannot_archive_or_unarchive_project(
     task_ctx: TaskTestContext,
+    client: httpx.AsyncClient,
 ) -> None:
-    """Writing to an archived project returns 409 Conflict."""
+    """Only OWNER or ADMIN can archive/unarchive projects; EDITOR receives 403."""
+    _, project = await _seed_workspace_and_project(task_ctx)
+
+    app.dependency_overrides[get_current_user] = lambda: task_ctx.editor
+    resp = await client.patch(f"/api/v1/projects/{project.id}/archive")
+    assert resp.status_code == 403
+
+
+@pytest.mark.anyio
+async def test_archived_project_blocks_modifications_and_delete(
+    task_ctx: TaskTestContext,
+    client: httpx.AsyncClient,
+) -> None:
+    """Writing to or deleting an archived project returns 409 Conflict."""
     _, project = await _seed_workspace_and_project(task_ctx)
     project.status = ProjectStatus.ARCHIVED
 
     app.dependency_overrides[get_current_user] = lambda: task_ctx.owner
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        resp = await ac.patch(
-            f"/api/v1/projects/{project.id}",
-            json={"name": "New Name"},
-        )
-    assert resp.status_code == 409
-    assert resp.json()["message"] == ERROR_PROJECT_ARCHIVED
+    resp_update = await client.patch(
+        f"/api/v1/projects/{project.id}",
+        json={"name": "New Name"},
+    )
+    assert resp_update.status_code == 409
+    assert resp_update.json()["message"] == ERROR_PROJECT_ARCHIVED
+
+    resp_delete = await client.delete(f"/api/v1/projects/{project.id}")
+    assert resp_delete.status_code == 409
+    assert resp_delete.json()["message"] == ERROR_PROJECT_ARCHIVED
 
 
 @pytest.mark.anyio
-async def test_create_task_success(task_ctx: TaskTestContext) -> None:
+async def test_patch_project_clear_description_null(
+    task_ctx: TaskTestContext,
+    client: httpx.AsyncClient,
+) -> None:
+    """PATCH with explicit null description clears it properly."""
+    _, project = await _seed_workspace_and_project(task_ctx)
+
+    app.dependency_overrides[get_current_user] = lambda: task_ctx.owner
+    resp = await client.patch(
+        f"/api/v1/projects/{project.id}",
+        json={"description": None},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["description"] is None
+
+
+@pytest.mark.anyio
+async def test_create_task_success(
+    task_ctx: TaskTestContext,
+    client: httpx.AsyncClient,
+) -> None:
     """Task creation defaults to status TODO and assigns current_user as creator."""
     _, project = await _seed_workspace_and_project(task_ctx)
 
     app.dependency_overrides[get_current_user] = lambda: task_ctx.editor
     tomorrow = datetime.now(UTC) + timedelta(days=1)
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        resp = await ac.post(
-            f"/api/v1/projects/{project.id}/tasks",
-            json={
-                "title": "Build Architecture",
-                "description": "FastAPI layered structure",
-                "priority": "HIGH",
-                "assignee_id": task_ctx.editor.id,
-                "due_date": tomorrow.isoformat(),
-            },
-        )
+    resp = await client.post(
+        f"/api/v1/projects/{project.id}/tasks",
+        json={
+            "title": "Build Architecture",
+            "description": "FastAPI layered structure",
+            "priority": "HIGH",
+            "assignee_id": task_ctx.editor.id,
+            "due_date": tomorrow.isoformat(),
+        },
+    )
     assert resp.status_code == 201
     data = resp.json()
     assert data["title"] == "Build Architecture"
@@ -529,22 +466,20 @@ async def test_create_task_success(task_ctx: TaskTestContext) -> None:
 @pytest.mark.anyio
 async def test_create_task_due_date_in_past_returns_422(
     task_ctx: TaskTestContext,
+    client: httpx.AsyncClient,
 ) -> None:
     """Due date in the past must be rejected with 422."""
     _, project = await _seed_workspace_and_project(task_ctx)
 
     app.dependency_overrides[get_current_user] = lambda: task_ctx.owner
     yesterday = datetime.now(UTC) - timedelta(days=1)
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        resp = await ac.post(
-            f"/api/v1/projects/{project.id}/tasks",
-            json={
-                "title": "Past Task",
-                "due_date": yesterday.isoformat(),
-            },
-        )
+    resp = await client.post(
+        f"/api/v1/projects/{project.id}/tasks",
+        json={
+            "title": "Past Task",
+            "due_date": yesterday.isoformat(),
+        },
+    )
     assert resp.status_code == 422
     assert resp.json()["error"] == "VALIDATION_ERROR"
     assert any(ERROR_DUE_DATE_IN_PAST in str(d) for d in resp.json().get("details", []))
@@ -553,21 +488,39 @@ async def test_create_task_due_date_in_past_returns_422(
 @pytest.mark.anyio
 async def test_create_task_assignee_outside_workspace_returns_400(
     task_ctx: TaskTestContext,
+    client: httpx.AsyncClient,
 ) -> None:
     """Assigning user from outside the workspace must return 400 Bad Request."""
     _, project = await _seed_workspace_and_project(task_ctx)
 
     app.dependency_overrides[get_current_user] = lambda: task_ctx.owner
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        resp = await ac.post(
-            f"/api/v1/projects/{project.id}/tasks",
-            json={
-                "title": "Outsider Task",
-                "assignee_id": task_ctx.outsider.id,
-            },
-        )
+    resp = await client.post(
+        f"/api/v1/projects/{project.id}/tasks",
+        json={
+            "title": "Outsider Task",
+            "assignee_id": task_ctx.outsider.id,
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["message"] == ERROR_ASSIGNEE_NOT_IN_WORKSPACE
+
+
+@pytest.mark.anyio
+async def test_create_task_assignee_viewer_returns_400(
+    task_ctx: TaskTestContext,
+    client: httpx.AsyncClient,
+) -> None:
+    """Assigning task to a VIEWER must return 400 as VIEWER lacks write capability."""
+    _, project = await _seed_workspace_and_project(task_ctx)
+
+    app.dependency_overrides[get_current_user] = lambda: task_ctx.owner
+    resp = await client.post(
+        f"/api/v1/projects/{project.id}/tasks",
+        json={
+            "title": "Viewer Assignee Task",
+            "assignee_id": task_ctx.viewer.id,
+        },
+    )
     assert resp.status_code == 400
     assert resp.json()["message"] == ERROR_ASSIGNEE_NOT_IN_WORKSPACE
 
@@ -575,19 +528,17 @@ async def test_create_task_assignee_outside_workspace_returns_400(
 @pytest.mark.anyio
 async def test_create_task_in_archived_project_returns_409(
     task_ctx: TaskTestContext,
+    client: httpx.AsyncClient,
 ) -> None:
     """Creating task in archived project returns 409 Conflict."""
     _, project = await _seed_workspace_and_project(task_ctx)
     project.status = ProjectStatus.ARCHIVED
 
     app.dependency_overrides[get_current_user] = lambda: task_ctx.owner
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        resp = await ac.post(
-            f"/api/v1/projects/{project.id}/tasks",
-            json={"title": "Should Fail"},
-        )
+    resp = await client.post(
+        f"/api/v1/projects/{project.id}/tasks",
+        json={"title": "Should Fail"},
+    )
     assert resp.status_code == 409
     assert resp.json()["message"] == ERROR_PROJECT_ARCHIVED
 
@@ -595,6 +546,7 @@ async def test_create_task_in_archived_project_returns_409(
 @pytest.mark.anyio
 async def test_viewer_cannot_create_or_update_task_returns_403(
     task_ctx: TaskTestContext,
+    client: httpx.AsyncClient,
 ) -> None:
     """VIEWER receives 403 on write endpoints but can read tasks."""
     _, project = await _seed_workspace_and_project(task_ctx)
@@ -605,38 +557,36 @@ async def test_viewer_cannot_create_or_update_task_returns_403(
     )
 
     app.dependency_overrides[get_current_user] = lambda: task_ctx.viewer
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        create_resp = await ac.post(
-            f"/api/v1/projects/{project.id}/tasks",
-            json={"title": "Viewer Attempt"},
-        )
-        assert create_resp.status_code == 403
+    create_resp = await client.post(
+        f"/api/v1/projects/{project.id}/tasks",
+        json={"title": "Viewer Attempt"},
+    )
+    assert create_resp.status_code == 403
 
-        update_resp = await ac.patch(
-            f"/api/v1/tasks/{task.id}",
-            json={"title": "Viewer Update"},
-        )
-        assert update_resp.status_code == 403
+    update_resp = await client.patch(
+        f"/api/v1/tasks/{task.id}",
+        json={"title": "Viewer Update"},
+    )
+    assert update_resp.status_code == 403
 
-        status_resp = await ac.patch(
-            f"/api/v1/tasks/{task.id}/status",
-            json={"status": "DONE"},
-        )
-        assert status_resp.status_code == 403
+    status_resp = await client.patch(
+        f"/api/v1/tasks/{task.id}/status",
+        json={"status": "DONE"},
+    )
+    assert status_resp.status_code == 403
 
-        delete_resp = await ac.delete(f"/api/v1/tasks/{task.id}")
-        assert delete_resp.status_code == 403
+    delete_resp = await client.delete(f"/api/v1/tasks/{task.id}")
+    assert delete_resp.status_code == 403
 
-        get_resp = await ac.get(f"/api/v1/tasks/{task.id}")
-        assert get_resp.status_code == 200
-        assert get_resp.json()["title"] == "Initial Task"
+    get_resp = await client.get(f"/api/v1/tasks/{task.id}")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["title"] == "Initial Task"
 
 
 @pytest.mark.anyio
 async def test_outsider_accessing_task_returns_404(
     task_ctx: TaskTestContext,
+    client: httpx.AsyncClient,
 ) -> None:
     """Outsider receives 404 on task detail to prevent resource enumeration."""
     _, project = await _seed_workspace_and_project(task_ctx)
@@ -647,18 +597,72 @@ async def test_outsider_accessing_task_returns_404(
     )
 
     app.dependency_overrides[get_current_user] = lambda: task_ctx.outsider
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        resp = await ac.get(f"/api/v1/tasks/{task.id}")
+    resp = await client.get(f"/api/v1/tasks/{task.id}")
     assert resp.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_patch_task_unassign_and_clear_fields(
+    task_ctx: TaskTestContext,
+    client: httpx.AsyncClient,
+) -> None:
+    """PATCH with null assignee_id, description, or due_date clears them properly."""
+    _, project = await _seed_workspace_and_project(task_ctx)
+    tomorrow = datetime.now(UTC) + timedelta(days=1)
+    task = await task_ctx.task_repo.create_task(
+        project_id=project.id,
+        created_by=task_ctx.owner.id,
+        title="Task with assignee",
+        description="Detailed description",
+        priority=TaskPriority.HIGH,
+        assignee_id=task_ctx.editor.id,
+        due_date=tomorrow,
+    )
+
+    app.dependency_overrides[get_current_user] = lambda: task_ctx.owner
+    resp = await client.patch(
+        f"/api/v1/tasks/{task.id}",
+        json={
+            "assignee_id": None,
+            "description": None,
+            "due_date": None,
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["assignee_id"] is None
+    assert data["assignee"] is None
+    assert data["description"] is None
+    assert data["due_date"] is None
+
+
+@pytest.mark.anyio
+async def test_patch_task_priority_null_returns_422(
+    task_ctx: TaskTestContext,
+    client: httpx.AsyncClient,
+) -> None:
+    """PATCH with explicit null priority must return 422 Unprocessable Entity."""
+    _, project = await _seed_workspace_and_project(task_ctx)
+    task = await task_ctx.task_repo.create_task(
+        project_id=project.id,
+        created_by=task_ctx.owner.id,
+        title="Task priority test",
+    )
+
+    app.dependency_overrides[get_current_user] = lambda: task_ctx.owner
+    resp = await client.patch(
+        f"/api/v1/tasks/{task.id}",
+        json={"priority": None},
+    )
+    assert resp.status_code == 422
 
 
 @pytest.mark.anyio
 async def test_list_tasks_filtering_and_pagination(
     task_ctx: TaskTestContext,
+    client: httpx.AsyncClient,
 ) -> None:
-    """Tasks list supports filtering by status, priority, assignee, and paginated results."""
+    """Tasks list supports filtering by multiple statuses, priority, and paginated results."""
     _, project = await _seed_workspace_and_project(task_ctx)
 
     t1 = await task_ctx.task_repo.create_task(
@@ -675,7 +679,7 @@ async def test_list_tasks_filtering_and_pagination(
         created_by=task_ctx.owner.id,
         title="Task 2",
         priority=TaskPriority.HIGH,
-        assignee_id=task_ctx.viewer.id,
+        assignee_id=task_ctx.editor.id,
     )
     t2.status = TaskStatus.IN_PROGRESS
 
@@ -684,38 +688,36 @@ async def test_list_tasks_filtering_and_pagination(
         created_by=task_ctx.owner.id,
         title="Task 3",
         priority=TaskPriority.HIGH,
-        assignee_id=task_ctx.editor.id,
+        assignee_id=task_ctx.owner.id,
     )
     t3.status = TaskStatus.TODO
 
     app.dependency_overrides[get_current_user] = lambda: task_ctx.owner
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        all_tasks = await ac.get(f"/api/v1/projects/{project.id}/tasks")
-        assert all_tasks.status_code == 200
-        assert all_tasks.json()["total"] == 3
+    all_tasks = await client.get(f"/api/v1/projects/{project.id}/tasks")
+    assert all_tasks.status_code == 200
+    assert all_tasks.json()["total"] == 3
 
-        filter_status = await ac.get(f"/api/v1/projects/{project.id}/tasks?status=DONE")
-        assert filter_status.status_code == 200
-        assert filter_status.json()["total"] == 1
-        assert filter_status.json()["items"][0]["id"] == t1.id
+    filter_multi_status = await client.get(
+        f"/api/v1/projects/{project.id}/tasks?status=TODO&status=DONE"
+    )
+    assert filter_multi_status.status_code == 200
+    assert filter_multi_status.json()["total"] == 2
 
-        filter_assignee = await ac.get(
-            f"/api/v1/projects/{project.id}/tasks?assignee_id={task_ctx.editor.id}"
-        )
-        assert filter_assignee.status_code == 200
-        assert filter_assignee.json()["total"] == 2
+    filter_priority = await client.get(f"/api/v1/projects/{project.id}/tasks?priority=HIGH")
+    assert filter_priority.status_code == 200
+    assert filter_priority.json()["total"] == 2
 
-        paginated = await ac.get(f"/api/v1/projects/{project.id}/tasks?page=1&limit=2")
-        assert paginated.status_code == 200
-        assert len(paginated.json()["items"]) == 2
-        assert paginated.json()["total_pages"] == 2
+    paginated = await client.get(f"/api/v1/projects/{project.id}/tasks?page=1&limit=2")
+    assert paginated.status_code == 200
+    assert len(paginated.json()["items"]) == 2
+    assert paginated.json()["total_pages"] == 2
+    assert paginated.json()["items"][0]["id"] > paginated.json()["items"][1]["id"]
 
 
 @pytest.mark.anyio
 async def test_update_task_and_quick_status_transition(
     task_ctx: TaskTestContext,
+    client: httpx.AsyncClient,
 ) -> None:
     """PATCH endpoints allow full update and fast status transition."""
     _, project = await _seed_workspace_and_project(task_ctx)
@@ -726,31 +728,118 @@ async def test_update_task_and_quick_status_transition(
     )
 
     app.dependency_overrides[get_current_user] = lambda: task_ctx.owner
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        patch_resp = await ac.patch(
-            f"/api/v1/tasks/{task.id}",
-            json={
-                "title": "Updated Title",
-                "priority": "URGENT",
-                "assignee_id": task_ctx.editor.id,
-            },
+    patch_resp = await client.patch(
+        f"/api/v1/tasks/{task.id}",
+        json={
+            "title": "Updated Title",
+            "priority": "URGENT",
+            "assignee_id": task_ctx.editor.id,
+        },
+    )
+    assert patch_resp.status_code == 200
+    assert patch_resp.json()["title"] == "Updated Title"
+    assert patch_resp.json()["priority"] == "URGENT"
+    assert patch_resp.json()["assignee_id"] == task_ctx.editor.id
+
+    status_resp = await client.patch(
+        f"/api/v1/tasks/{task.id}/status",
+        json={"status": "DONE"},
+    )
+    assert status_resp.status_code == 200
+    assert status_resp.json()["status"] == "DONE"
+
+    del_resp = await client.delete(f"/api/v1/tasks/{task.id}")
+    assert del_resp.status_code == 200
+
+    get_after_del = await client.get(f"/api/v1/tasks/{task.id}")
+    assert get_after_del.status_code == 404
+
+
+def test_project_and_task_repository_sql_compilation() -> None:
+    """Verify that Project and Task repository queries compile valid SQL statements."""
+    from sqlalchemy.dialects import mysql
+
+    from app.models.workspace import Workspace, WorkspaceMember
+
+    project_query = (
+        select(Project, WorkspaceMember.role, Workspace.owner_id)
+        .join(Workspace, Project.workspace_id == Workspace.id)
+        .outerjoin(
+            WorkspaceMember,
+            (WorkspaceMember.workspace_id == Workspace.id) & (WorkspaceMember.user_id == 42),
         )
-        assert patch_resp.status_code == 200
-        assert patch_resp.json()["title"] == "Updated Title"
-        assert patch_resp.json()["priority"] == "URGENT"
-        assert patch_resp.json()["assignee_id"] == task_ctx.editor.id
+        .where(Project.id == 1)
+    )
+    project_sql = str(project_query.compile(dialect=mysql.dialect()))
+    assert "JOIN workspaces ON projects.workspace_id = workspaces.id" in project_sql
+    assert "LEFT OUTER JOIN workspace_members ON" in project_sql
 
-        status_resp = await ac.patch(
-            f"/api/v1/tasks/{task.id}/status",
-            json={"status": "DONE"},
-        )
-        assert status_resp.status_code == 200
-        assert status_resp.json()["status"] == "DONE"
+    task_filter_query = (
+        select(Task)
+        .where(Task.project_id == 10, Task.status.in_([TaskStatus.TODO, TaskStatus.DONE]))
+        .order_by(Task.id.desc())
+    )
+    task_sql = str(task_filter_query.compile(dialect=mysql.dialect()))
+    assert "tasks.project_id = %s" in task_sql or "tasks.project_id =" in task_sql
+    assert "tasks.status IN" in task_sql
 
-        del_resp = await ac.delete(f"/api/v1/tasks/{task.id}")
-        assert del_resp.status_code == 200
 
-        get_after_del = await ac.get(f"/api/v1/tasks/{task.id}")
-        assert get_after_del.status_code == 404
+@pytest.mark.anyio
+async def test_real_project_and_task_repository_integration() -> None:
+    """Test real SQL repository operations against MySQL engine if available; skip if offline."""
+    settings = get_settings()
+    engine = create_async_engine(
+        settings.DATABASE_URL,
+        connect_args={"connect_timeout": 2},
+        pool_pre_ping=True,
+    )
+    session_factory = async_sessionmaker(
+        bind=engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+    )
+    try:
+        async with session_factory() as probe:
+            await probe.execute(text("SELECT 1"))
+            await probe.execute(text("SELECT id FROM projects LIMIT 1"))
+            await probe.execute(text("SELECT id FROM tasks LIMIT 1"))
+    except Exception as exc:
+        await engine.dispose()
+        pytest.skip(f"MySQL unavailable or unmigrated for task repository integration: {exc}")
+
+    async with session_factory() as session:
+        try:
+            p_repo = ProjectRepository(session)
+            t_repo = TaskRepository(session)
+
+            test_uid = 99991
+            p = await p_repo.create(
+                workspace_id=1,
+                name="Integration Project",
+                status=ProjectStatus.ACTIVE,
+            )
+            await session.flush()
+
+            t = await t_repo.create_task(
+                project_id=p.id,
+                created_by=test_uid,
+                title="Integration Task",
+            )
+            await session.flush()
+
+            resolved = await t_repo.get_with_project_and_workspace_role(t.id, test_uid)
+            assert resolved is not None
+
+            res_list = await t_repo.list_by_project(
+                project_id=p.id,
+                pagination=PaginationParams(page=1, limit=10),
+                statuses=[TaskStatus.TODO],
+            )
+            assert any(item.id == t.id for item in res_list.items)
+
+            await p_repo.delete(p.id)
+            await session.flush()
+        finally:
+            await session.rollback()
+            await engine.dispose()

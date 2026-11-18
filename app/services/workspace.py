@@ -3,6 +3,11 @@
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.constants import (
+    RESOURCE_USER,
+    RESOURCE_WORKSPACE,
+    RESOURCE_WORKSPACE_MEMBER,
+)
 from app.core.exceptions import (
     BadRequestException,
     ConflictException,
@@ -51,7 +56,7 @@ class WorkspaceService:
         """Fetch workspace by id or raise NotFoundException if absent."""
         workspace = await self.workspace_repo.get_by_id(workspace_id)
         if workspace is None:
-            raise NotFoundException("Workspace")
+            raise NotFoundException(RESOURCE_WORKSPACE)
         return workspace
 
     async def _get_workspace_for_owner_or_admin(
@@ -233,7 +238,7 @@ class WorkspaceService:
 
         target_user = await self.user_repo.get_by_id(data.user_id)
         if target_user is None:
-            raise NotFoundException("User", data.user_id)
+            raise NotFoundException(RESOURCE_USER, data.user_id)
         if not target_user.is_active:
             raise BadRequestException(ERROR_INACTIVE_USER)
 
@@ -268,7 +273,7 @@ class WorkspaceService:
 
         target_member = await self.member_repo.get_member(workspace_id, target_user_id)
         if target_member is None:
-            raise NotFoundException("Workspace member")
+            raise NotFoundException(RESOURCE_WORKSPACE_MEMBER)
 
         updated = await self.member_repo.update_role(
             workspace_id=workspace_id,
@@ -276,7 +281,7 @@ class WorkspaceService:
             role=data.role,
         )
         if updated is None:
-            raise NotFoundException("Workspace member")
+            raise NotFoundException(RESOURCE_WORKSPACE_MEMBER)
 
         await self.session.commit()
         return updated
@@ -298,7 +303,7 @@ class WorkspaceService:
 
         target_member = await self.member_repo.get_member(workspace_id, target_user_id)
         if target_member is None:
-            raise NotFoundException("Workspace member")
+            raise NotFoundException(RESOURCE_WORKSPACE_MEMBER)
 
         if workspace.owner_id == target_user_id:
             raise BadRequestException(ERROR_CANNOT_DEMOTE_OR_REMOVE_WORKSPACE_OWNER)

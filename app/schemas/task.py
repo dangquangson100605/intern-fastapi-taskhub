@@ -1,14 +1,32 @@
 """Pydantic schemas for Task entities and status updates."""
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import AfterValidator, ConfigDict, Field, ValidationInfo, field_validator
 
-from app.core.constants import TASK_TITLE_MAX_LENGTH, TASK_TITLE_MIN_LENGTH
+from app.core.constants import (
+    DESCRIPTION_MAX_LENGTH,
+    TASK_TITLE_MAX_LENGTH,
+    TASK_TITLE_MIN_LENGTH,
+)
 from app.core.messages import ERROR_DUE_DATE_IN_PAST
 from app.models.enums import TaskPriority, TaskStatus
 from app.schemas.base import BaseSchema, validate_non_null
+
+
+def validate_future_utc_datetime(value: datetime | None) -> datetime | None:
+    """Validate that due_date is in the future and normalize timezone to UTC naive datetime."""
+    if value is not None:
+        now_utc = datetime.now(UTC)
+        val_utc = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        if val_utc < now_utc:
+            raise ValueError(ERROR_DUE_DATE_IN_PAST)
+        return val_utc.astimezone(UTC).replace(tzinfo=None)
+    return None
+
+
+DueDate = Annotated[datetime | None, AfterValidator(validate_future_utc_datetime)]
 
 
 class TaskCreate(BaseSchema):
@@ -19,21 +37,10 @@ class TaskCreate(BaseSchema):
         min_length=TASK_TITLE_MIN_LENGTH,
         max_length=TASK_TITLE_MAX_LENGTH,
     )
-    description: str | None = Field(default=None)
+    description: str | None = Field(default=None, max_length=DESCRIPTION_MAX_LENGTH)
     priority: TaskPriority = Field(default=TaskPriority.MEDIUM)
     assignee_id: int | None = Field(default=None, ge=1)
-    due_date: datetime | None = Field(default=None)
-
-    @field_validator("due_date")
-    @classmethod
-    def validate_due_date(cls, value: datetime | None) -> datetime | None:
-        """Reject due dates positioned in the past."""
-        if value is not None:
-            now_utc = datetime.now(UTC)
-            val_utc = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-            if val_utc < now_utc:
-                raise ValueError(ERROR_DUE_DATE_IN_PAST)
-        return value
+    due_date: DueDate = None
 
 
 class TaskUpdate(BaseSchema):
@@ -44,28 +51,16 @@ class TaskUpdate(BaseSchema):
         min_length=TASK_TITLE_MIN_LENGTH,
         max_length=TASK_TITLE_MAX_LENGTH,
     )
-    description: str | None = Field(default=None)
+    description: str | None = Field(default=None, max_length=DESCRIPTION_MAX_LENGTH)
     priority: TaskPriority | None = Field(default=None)
-    status: TaskStatus | None = Field(default=None)
     assignee_id: int | None = Field(default=None, ge=1)
-    due_date: datetime | None = Field(default=None)
+    due_date: DueDate = None
 
-    @field_validator("title")
+    @field_validator("title", "priority")
     @classmethod
     def check_non_null(cls, value: Any, info: ValidationInfo) -> Any:
-        """Reject explicit null on partial title update."""
+        """Reject explicit null on fields that cannot be null."""
         return validate_non_null(value, info)
-
-    @field_validator("due_date")
-    @classmethod
-    def validate_due_date(cls, value: datetime | None) -> datetime | None:
-        """Reject due dates positioned in the past."""
-        if value is not None:
-            now_utc = datetime.now(UTC)
-            val_utc = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-            if val_utc < now_utc:
-                raise ValueError(ERROR_DUE_DATE_IN_PAST)
-        return value
 
 
 class TaskStatusUpdate(BaseSchema):

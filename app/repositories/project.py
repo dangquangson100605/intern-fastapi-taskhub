@@ -3,7 +3,6 @@
 import math
 
 from sqlalchemy import and_, func, select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.enums import ProjectStatus, WorkspaceRole
 from app.models.project import Project
@@ -16,9 +15,6 @@ class ProjectRepository(BaseRepository[Project]):
     """Repository managing Project entity persistence."""
 
     model = Project
-
-    def __init__(self, session: AsyncSession) -> None:
-        super().__init__(session)
 
     async def get_with_workspace_role(
         self,
@@ -53,9 +49,7 @@ class ProjectRepository(BaseRepository[Project]):
         pagination: PaginationParams,
     ) -> PaginationResult[Project]:
         """Fetch paginated projects belonging to a workspace."""
-        count_query = select(func.count(Project.id)).where(
-            Project.workspace_id == workspace_id
-        )
+        count_query = select(func.count(Project.id)).where(Project.workspace_id == workspace_id)
         total_result = await self.session.execute(count_query)
         total = total_result.scalar() or 0
 
@@ -90,17 +84,3 @@ class ProjectRepository(BaseRepository[Project]):
             description=description,
             status=ProjectStatus.ACTIVE,
         )
-
-    async def update_status(
-        self,
-        project_id: int,
-        status: ProjectStatus,
-    ) -> Project | None:
-        """Update lifecycle status of a project."""
-        project = await self.get_by_id(project_id)
-        if project is None:
-            return None
-        project.status = status
-        await self.session.flush()
-        await self.session.refresh(project)
-        return project
