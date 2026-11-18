@@ -33,6 +33,16 @@ ERROR_INTERNAL_SERVER: str = "An unexpected error occurred"
 ERROR_REDIS_UNAVAILABLE: str = "Authentication cache service is temporarily unavailable"
 ERROR_INSECURE_JWT_SECRET: str = "JWT_SECRET_KEY must not use a placeholder value"
 
+ERROR_WORKSPACE_NOT_FOUND: str = "Workspace not found"
+ERROR_WORKSPACE_MEMBER_NOT_FOUND: str = "Workspace member not found"
+ERROR_WORKSPACE_MEMBER_ALREADY_EXISTS: str = "User is already a member of this workspace"
+ERROR_CANNOT_DEMOTE_OR_REMOVE_WORKSPACE_OWNER: str = "Cannot demote or remove the workspace owner"
+ERROR_CANNOT_ASSIGN_OWNER_ROLE: str = (
+    "Cannot assign OWNER role directly; transfer ownership instead"
+)
+
 SUCCESS_USER_DELETED: str = "User deleted successfully"
 SUCCESS_LOGOUT: str = "Logged out successfully"
 SUCCESS_PASSWORD_CHANGED: str = "Password updated successfully"
+SUCCESS_WORKSPACE_DELETED: str = "Workspace deleted successfully"
+SUCCESS_WORKSPACE_MEMBER_REMOVED: str = "Member removed from workspace successfully"

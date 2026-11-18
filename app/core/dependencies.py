@@ -24,8 +24,11 @@ from app.models.enums import TokenType, UserRole
 from app.models.user import User
 from app.repositories.refresh_token import RefreshTokenRepository
 from app.repositories.user import UserRepository
+from app.repositories.workspace import WorkspaceRepository
+from app.repositories.workspace_member import WorkspaceMemberRepository
 from app.services.auth import AuthService
 from app.services.user import UserService
+from app.services.workspace import WorkspaceService
 
 bearer_scheme = HTTPBearer(
     auto_error=False,
@@ -157,3 +160,40 @@ def require_role(*allowed_roles: UserRole) -> Callable[[CurrentUser], User]:
 
 
 AdminUser = Annotated[User, Depends(require_role(UserRole.ADMIN))]
+
+
+def get_workspace_repository(session: SessionDep) -> WorkspaceRepository:
+    """Dependency: instantiate WorkspaceRepository with injected session."""
+    return WorkspaceRepository(session)
+
+
+WorkspaceRepoDep = Annotated[WorkspaceRepository, Depends(get_workspace_repository)]
+
+
+def get_workspace_member_repository(session: SessionDep) -> WorkspaceMemberRepository:
+    """Dependency: instantiate WorkspaceMemberRepository with injected session."""
+    return WorkspaceMemberRepository(session)
+
+
+WorkspaceMemberRepoDep = Annotated[
+    WorkspaceMemberRepository, Depends(get_workspace_member_repository)
+]
+
+
+def get_workspace_service(
+    session: SessionDep,
+    workspace_repo: WorkspaceRepoDep,
+    member_repo: WorkspaceMemberRepoDep,
+    user_repo: UserRepoDep,
+) -> WorkspaceService:
+    """Dependency: instantiate WorkspaceService with repositories and database session."""
+    return WorkspaceService(
+        session=session,
+        workspace_repo=workspace_repo,
+        member_repo=member_repo,
+        user_repo=user_repo,
+    )
+
+
+WorkspaceServiceDep = Annotated[WorkspaceService, Depends(get_workspace_service)]
+
