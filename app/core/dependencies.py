@@ -22,6 +22,8 @@ from app.core.redis import TokenBlacklistService, redis_client
 from app.core.security import TokenPayload, decode_token
 from app.models.enums import TokenType, UserRole
 from app.models.user import User
+from app.repositories.comment import CommentRepository
+from app.repositories.label import LabelRepository
 from app.repositories.project import ProjectRepository
 from app.repositories.refresh_token import RefreshTokenRepository
 from app.repositories.task import TaskRepository
@@ -30,6 +32,8 @@ from app.repositories.workspace import WorkspaceRepository
 from app.repositories.workspace_member import WorkspaceMemberRepository
 from app.schemas.common import PaginationParams
 from app.services.auth import AuthService
+from app.services.comment import CommentService
+from app.services.label import LabelService
 from app.services.project import ProjectService
 from app.services.task import TaskService
 from app.services.user import UserService
@@ -259,5 +263,59 @@ def get_task_service(
 
 
 TaskServiceDep = Annotated[TaskService, Depends(get_task_service)]
+
+
+def get_label_repository(session: SessionDep) -> LabelRepository:
+    """Dependency: instantiate LabelRepository with a DB session."""
+    return LabelRepository(session)
+
+
+LabelRepoDep = Annotated[LabelRepository, Depends(get_label_repository)]
+
+
+def get_comment_repository(session: SessionDep) -> CommentRepository:
+    """Dependency: instantiate CommentRepository with a DB session."""
+    return CommentRepository(session)
+
+
+CommentRepoDep = Annotated[CommentRepository, Depends(get_comment_repository)]
+
+
+def get_label_service(
+    session: SessionDep,
+    label_repo: LabelRepoDep,
+    project_repo: ProjectRepoDep,
+    task_repo: TaskRepoDep,
+    workspace_repo: WorkspaceRepoDep,
+    member_repo: WorkspaceMemberRepoDep,
+) -> LabelService:
+    """Dependency: instantiate LabelService with repositories and database session."""
+    return LabelService(
+        session=session,
+        label_repo=label_repo,
+        project_repo=project_repo,
+        task_repo=task_repo,
+        workspace_repo=workspace_repo,
+        member_repo=member_repo,
+    )
+
+
+LabelServiceDep = Annotated[LabelService, Depends(get_label_service)]
+
+
+def get_comment_service(
+    session: SessionDep,
+    comment_repo: CommentRepoDep,
+    task_repo: TaskRepoDep,
+) -> CommentService:
+    """Dependency: instantiate CommentService with repositories and database session."""
+    return CommentService(
+        session=session,
+        comment_repo=comment_repo,
+        task_repo=task_repo,
+    )
+
+
+CommentServiceDep = Annotated[CommentService, Depends(get_comment_service)]
 
 
