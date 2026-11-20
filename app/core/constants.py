@@ -1,5 +1,13 @@
 """Application constants: validation constraints, security settings, and defaults."""
 
+from app.core.enums import WorkspaceRole
+
+RESOURCE_USER: str = "User"
+RESOURCE_WORKSPACE: str = "Workspace"
+RESOURCE_WORKSPACE_MEMBER: str = "Workspace member"
+RESOURCE_PROJECT: str = "Project"
+RESOURCE_TASK: str = "Task"
+
 DEFAULT_PAGE: int = 1
 DEFAULT_LIMIT: int = 20
 MAX_LIMIT: int = 100
@@ -26,8 +34,16 @@ INSECURE_JWT_SECRET_PLACEHOLDERS: tuple[str, ...] = (
 WORKSPACE_NAME_MIN_LENGTH: int = 1
 WORKSPACE_NAME_MAX_LENGTH: int = 255
 
+WORKSPACE_WRITE_ROLES: frozenset[WorkspaceRole] = frozenset(
+    {
+        WorkspaceRole.OWNER,
+        WorkspaceRole.EDITOR,
+    }
+)
+
 PROJECT_NAME_MIN_LENGTH: int = 1
 PROJECT_NAME_MAX_LENGTH: int = 255
+DESCRIPTION_MAX_LENGTH: int = 10_000
 
 TASK_TITLE_MIN_LENGTH: int = 1
 TASK_TITLE_MAX_LENGTH: int = 500

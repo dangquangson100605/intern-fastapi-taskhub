@@ -41,8 +41,16 @@ ERROR_CANNOT_ASSIGN_OWNER_ROLE: str = (
     "Cannot assign OWNER role directly; transfer ownership instead"
 )
 
+ERROR_PROJECT_ARCHIVED: str = "Project is archived and cannot be modified"
+ERROR_PROJECT_ALREADY_ARCHIVED: str = "Project is already archived"
+ERROR_PROJECT_ALREADY_ACTIVE: str = "Project is already active"
+ERROR_ASSIGNEE_NOT_IN_WORKSPACE: str = "Assignee must be a member of the workspace"
+ERROR_DUE_DATE_IN_PAST: str = "Due date cannot be in the past"
+
 SUCCESS_USER_DELETED: str = "User deleted successfully"
 SUCCESS_LOGOUT: str = "Logged out successfully"
 SUCCESS_PASSWORD_CHANGED: str = "Password updated successfully"
 SUCCESS_WORKSPACE_DELETED: str = "Workspace deleted successfully"
 SUCCESS_WORKSPACE_MEMBER_REMOVED: str = "Member removed from workspace successfully"
+SUCCESS_PROJECT_DELETED: str = "Project deleted successfully"
+SUCCESS_TASK_DELETED: str = "Task deleted successfully"
