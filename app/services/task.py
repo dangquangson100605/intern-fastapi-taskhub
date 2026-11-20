@@ -152,7 +152,8 @@ class TaskService:
             due_date=data.due_date,
         )
         await self.session.commit()
-        await self.session.refresh(task, attribute_names=["assignee", "creator"])
+        await self.session.refresh(task)
+        await self.session.refresh(task, attribute_names=["creator", "assignee"])
         return TaskResponse.model_validate(task)
 
     async def list_tasks(
@@ -240,7 +241,8 @@ class TaskService:
             task.assignee = None
 
         await self.session.commit()
-        await self.session.refresh(task, attribute_names=["assignee", "creator"])
+        await self.session.refresh(task)
+        await self.session.refresh(task, attribute_names=["creator", "assignee"])
         return TaskResponse.model_validate(task)
 
     async def update_task_status(
@@ -258,7 +260,8 @@ class TaskService:
 
         task.status = data.status
         await self.session.commit()
-        await self.session.refresh(task, attribute_names=["assignee", "creator"])
+        await self.session.refresh(task)
+        await self.session.refresh(task, attribute_names=["creator", "assignee"])
         return TaskResponse.model_validate(task)
 
     async def delete_task(

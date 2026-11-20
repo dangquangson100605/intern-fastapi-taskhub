@@ -112,5 +112,5 @@ class TaskRepository(BaseRepository[Task]):
         )
         self.session.add(instance)
         await self.session.flush()
-        await self.session.refresh(instance, attribute_names=["creator"])
+        await self.session.refresh(instance)
         return instance
