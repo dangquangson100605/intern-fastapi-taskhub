@@ -38,8 +38,15 @@ class AppException(HTTPException):
 class NotFoundException(AppException):
     """Resource not found (404)."""
 
-    def __init__(self, resource: str = "Resource", resource_id: int | str = "") -> None:
-        if resource.lower() == "user" and resource_id:
+    def __init__(
+        self,
+        resource: str = "Resource",
+        resource_id: int | str = "",
+        message: str | None = None,
+    ) -> None:
+        if message is not None:
+            detail = message
+        elif resource.lower() == "user" and resource_id:
             detail = ERROR_USER_NOT_FOUND.format(user_id=resource_id)
         elif resource_id:
             detail = ERROR_RESOURCE_WITH_ID_NOT_FOUND.format(

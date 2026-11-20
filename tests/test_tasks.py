@@ -813,9 +813,19 @@ async def test_real_project_and_task_repository_integration() -> None:
             p_repo = ProjectRepository(session)
             t_repo = TaskRepository(session)
 
-            test_uid = 99991
+            user_row = (
+                await session.execute(text("SELECT id FROM users ORDER BY id ASC LIMIT 1"))
+            ).scalar()
+            ws_row = (
+                await session.execute(text("SELECT id FROM workspaces ORDER BY id ASC LIMIT 1"))
+            ).scalar()
+            if user_row is None or ws_row is None:
+                pytest.skip("Integration test requires existing user and workspace in the database")
+
+            test_uid = int(user_row)
+            test_ws_id = int(ws_row)
             p = await p_repo.create(
-                workspace_id=1,
+                workspace_id=test_ws_id,
                 name="Integration Project",
                 status=ProjectStatus.ACTIVE,
             )
