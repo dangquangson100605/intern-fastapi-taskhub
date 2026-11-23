@@ -1,5 +1,6 @@
 """Label service managing label CRUD, scope validation, and task associations."""
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
@@ -7,25 +8,20 @@ from app.core.constants import (
     RESOURCE_PROJECT,
     RESOURCE_TASK,
     RESOURCE_WORKSPACE,
-    WORKSPACE_WRITE_ROLES,
 )
 from app.core.exceptions import (
-    BadRequestException,
     ConflictException,
-    ForbiddenException,
     NotFoundException,
 )
 from app.core.messages import (
     ERROR_LABEL_ALREADY_ASSIGNED,
+    ERROR_LABEL_NAME_EXISTS,
     ERROR_LABEL_NOT_ASSIGNED,
-    ERROR_LABEL_PROJECT_MISMATCH,
-    ERROR_PERMISSION_DENIED,
-    ERROR_PROJECT_ARCHIVED,
     SUCCESS_LABEL_ASSIGNED,
     SUCCESS_LABEL_DELETED,
     SUCCESS_LABEL_REMOVED,
 )
-from app.models.enums import ProjectStatus, UserRole
+from app.models.enums import UserRole
 from app.models.project import Project
 from app.models.task import Task
 from app.models.user import User
@@ -34,8 +30,9 @@ from app.repositories.project import ProjectRepository
 from app.repositories.task import TaskRepository
 from app.repositories.workspace import WorkspaceRepository
 from app.repositories.workspace_member import WorkspaceMemberRepository
-from app.schemas.common import MessageResponse
+from app.schemas.common import MessageResponse, PaginatedResponse, PaginationParams
 from app.schemas.label import LabelCreate, LabelResponse, LabelUpdate
+from app.services.policies import ensure_write_access
 
 
 class LabelService:
@@ -71,16 +68,12 @@ class LabelService:
             raise NotFoundException(RESOURCE_PROJECT, project_id)
 
         project, role = resolved
-        is_admin = current_user.role == UserRole.ADMIN
-        if not is_admin and role is None:
-            raise NotFoundException(RESOURCE_PROJECT, project_id)
-
-        if not is_admin and role not in WORKSPACE_WRITE_ROLES:
-            raise ForbiddenException(ERROR_PERMISSION_DENIED)
-
-        if project.status == ProjectStatus.ARCHIVED:
-            raise ConflictException(ERROR_PROJECT_ARCHIVED)
-
+        ensure_write_access(
+            role=role,
+            project=project,
+            is_admin=current_user.role == UserRole.ADMIN,
+            not_found_exc=NotFoundException(RESOURCE_PROJECT, project_id),
+        )
         return project
 
     async def _resolve_task_write_access(
@@ -97,16 +90,12 @@ class LabelService:
             raise NotFoundException(RESOURCE_TASK, task_id)
 
         task, project, role = resolved
-        is_admin = current_user.role == UserRole.ADMIN
-        if not is_admin and role is None:
-            raise NotFoundException(RESOURCE_TASK, task_id)
-
-        if not is_admin and role not in WORKSPACE_WRITE_ROLES:
-            raise ForbiddenException(ERROR_PERMISSION_DENIED)
-
-        if project.status == ProjectStatus.ARCHIVED:
-            raise ConflictException(ERROR_PROJECT_ARCHIVED)
-
+        ensure_write_access(
+            role=role,
+            project=project,
+            is_admin=current_user.role == UserRole.ADMIN,
+            not_found_exc=NotFoundException(RESOURCE_TASK, task_id),
+        )
         return task, project
 
     async def create_label(
@@ -117,12 +106,17 @@ class LabelService:
     ) -> LabelResponse:
         """Create a new label inside a project enforcing workspace write permissions."""
         await self._resolve_project_write_access(project_id, current_user)
-        label = await self.label_repo.create_label(
-            project_id=project_id,
-            name=data.name,
-            color=data.color,
-        )
-        await self.session.commit()
+        try:
+            label = await self.label_repo.create_label(
+                project_id=project_id,
+                name=data.name,
+                color=data.color,
+            )
+            await self.session.commit()
+        except IntegrityError as exc:
+            await self.session.rollback()
+            raise ConflictException(ERROR_LABEL_NAME_EXISTS) from exc
+
         await self.session.refresh(label)
         return LabelResponse.model_validate(label)
 
@@ -130,8 +124,9 @@ class LabelService:
         self,
         project_id: int,
         current_user: User,
-    ) -> list[LabelResponse]:
-        """Retrieve all labels belonging to a project for any workspace member."""
+        pagination: PaginationParams,
+    ) -> PaginatedResponse[LabelResponse]:
+        """Retrieve paginated labels belonging to a project for any workspace member."""
         resolved = await self.project_repo.get_with_workspace_role(
             project_id=project_id,
             user_id=current_user.id,
@@ -143,15 +138,22 @@ class LabelService:
         if current_user.role != UserRole.ADMIN and role is None:
             raise NotFoundException(RESOURCE_PROJECT, project_id)
 
-        labels = await self.label_repo.list_by_project(project_id)
-        return [LabelResponse.model_validate(lbl) for lbl in labels]
+        result = await self.label_repo.list_by_project(project_id, pagination)
+        return PaginatedResponse[LabelResponse](
+            items=[LabelResponse.model_validate(lbl) for lbl in result.items],
+            total=result.total,
+            page=result.page,
+            limit=result.limit,
+            total_pages=result.total_pages,
+        )
 
     async def list_workspace_labels(
         self,
         workspace_id: int,
         current_user: User,
-    ) -> list[LabelResponse]:
-        """Retrieve all labels belonging to a workspace for any member."""
+        pagination: PaginationParams,
+    ) -> PaginatedResponse[LabelResponse]:
+        """Retrieve paginated labels belonging to a workspace for any member."""
         ws = await self.workspace_repo.get_by_id(workspace_id)
         if ws is None:
             raise NotFoundException(RESOURCE_WORKSPACE, workspace_id)
@@ -162,8 +164,14 @@ class LabelService:
             if member is None and ws.owner_id != current_user.id:
                 raise NotFoundException(RESOURCE_WORKSPACE, workspace_id)
 
-        labels = await self.label_repo.list_by_workspace(workspace_id)
-        return [LabelResponse.model_validate(lbl) for lbl in labels]
+        result = await self.label_repo.list_by_workspace(workspace_id, pagination)
+        return PaginatedResponse[LabelResponse](
+            items=[LabelResponse.model_validate(lbl) for lbl in result.items],
+            total=result.total,
+            page=result.page,
+            limit=result.limit,
+            total_pages=result.total_pages,
+        )
 
     async def update_label(
         self,
@@ -180,21 +188,23 @@ class LabelService:
             raise NotFoundException(RESOURCE_LABEL, label_id)
 
         label, project, role = resolved
-        is_admin = current_user.role == UserRole.ADMIN
-        if not is_admin and role is None:
-            raise NotFoundException(RESOURCE_LABEL, label_id)
-
-        if not is_admin and role not in WORKSPACE_WRITE_ROLES:
-            raise ForbiddenException(ERROR_PERMISSION_DENIED)
-
-        if project.status == ProjectStatus.ARCHIVED:
-            raise ConflictException(ERROR_PROJECT_ARCHIVED)
+        ensure_write_access(
+            role=role,
+            project=project,
+            is_admin=current_user.role == UserRole.ADMIN,
+            not_found_exc=NotFoundException(RESOURCE_LABEL, label_id),
+        )
 
         update_data = data.model_dump(exclude_unset=True)
         for field, value in update_data.items():
             setattr(label, field, value)
 
-        await self.session.commit()
+        try:
+            await self.session.commit()
+        except IntegrityError as exc:
+            await self.session.rollback()
+            raise ConflictException(ERROR_LABEL_NAME_EXISTS) from exc
+
         await self.session.refresh(label)
         return LabelResponse.model_validate(label)
 
@@ -212,15 +222,12 @@ class LabelService:
             raise NotFoundException(RESOURCE_LABEL, label_id)
 
         label, project, role = resolved
-        is_admin = current_user.role == UserRole.ADMIN
-        if not is_admin and role is None:
-            raise NotFoundException(RESOURCE_LABEL, label_id)
-
-        if not is_admin and role not in WORKSPACE_WRITE_ROLES:
-            raise ForbiddenException(ERROR_PERMISSION_DENIED)
-
-        if project.status == ProjectStatus.ARCHIVED:
-            raise ConflictException(ERROR_PROJECT_ARCHIVED)
+        ensure_write_access(
+            role=role,
+            project=project,
+            is_admin=current_user.role == UserRole.ADMIN,
+            not_found_exc=NotFoundException(RESOURCE_LABEL, label_id),
+        )
 
         await self.label_repo.delete(label.id)
         await self.session.commit()
@@ -233,20 +240,19 @@ class LabelService:
         current_user: User,
     ) -> MessageResponse:
         """Attach a label to a task checking same-project scope and duplicate prevention."""
-        task, project = await self._resolve_task_write_access(task_id, current_user)
+        task, _ = await self._resolve_task_write_access(task_id, current_user)
 
-        label = await self.label_repo.get_by_id(label_id)
+        label = await self.label_repo.get_in_project(label_id, task.project_id)
         if label is None:
             raise NotFoundException(RESOURCE_LABEL, label_id)
 
-        if label.project_id != task.project_id:
-            raise BadRequestException(ERROR_LABEL_PROJECT_MISMATCH)
+        try:
+            await self.label_repo.assign_to_task(task_id, label_id)
+            await self.session.commit()
+        except IntegrityError as exc:
+            await self.session.rollback()
+            raise ConflictException(ERROR_LABEL_ALREADY_ASSIGNED) from exc
 
-        if await self.label_repo.is_assigned_to_task(task_id, label_id):
-            raise ConflictException(ERROR_LABEL_ALREADY_ASSIGNED)
-
-        await self.label_repo.assign_to_task(task_id, label_id)
-        await self.session.commit()
         return MessageResponse(message=SUCCESS_LABEL_ASSIGNED)
 
     async def remove_label_from_task(
@@ -255,17 +261,13 @@ class LabelService:
         label_id: int,
         current_user: User,
     ) -> MessageResponse:
-        """Detach a label from a task enforcing write permissions."""
-        task, project = await self._resolve_task_write_access(task_id, current_user)
+        """Detach a label from a task enforcing write permissions in a single delete."""
+        await self._resolve_task_write_access(task_id, current_user)
 
-        label = await self.label_repo.get_by_id(label_id)
-        if label is None:
-            raise NotFoundException(RESOURCE_LABEL, label_id)
-
-        if not await self.label_repo.is_assigned_to_task(task_id, label_id):
+        deleted = await self.label_repo.remove_from_task(task_id, label_id)
+        if not deleted:
             raise NotFoundException(message=ERROR_LABEL_NOT_ASSIGNED)
 
-        await self.label_repo.remove_from_task(task_id, label_id)
         await self.session.commit()
         return MessageResponse(message=SUCCESS_LABEL_REMOVED)
 

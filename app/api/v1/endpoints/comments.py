@@ -1,10 +1,10 @@
-"""Comment API endpoints for creating, listing, and author-authorized deletion of comments."""
+"""Comment API endpoints for creating, listing, updating, and author-authorized deletion."""
 
 from fastapi import APIRouter, status
 
-from app.core.dependencies import CommentServiceDep, CurrentUser
-from app.schemas.comment import CommentCreate, CommentResponse
-from app.schemas.common import MessageResponse
+from app.core.dependencies import CommentServiceDep, CurrentUser, PaginationDep
+from app.schemas.comment import CommentCreate, CommentResponse, CommentUpdate
+from app.schemas.common import MessageResponse, PaginatedResponse
 
 router = APIRouter(tags=["Comments"])
 
@@ -39,10 +39,10 @@ async def create_comment(
 
 @router.get(
     "/tasks/{task_id}/comments",
-    response_model=list[CommentResponse],
+    response_model=PaginatedResponse[CommentResponse],
     status_code=status.HTTP_200_OK,
     summary="List comments on a task",
-    description="Retrieve all comments for a task ordered chronologically by created_at ascending.",
+    description="Retrieve paginated comments for a task ordered chronologically by created_at ascending.",
     responses={
         401: {"description": "Not authenticated"},
         404: {"description": "Task not found"},
@@ -52,11 +52,41 @@ async def list_comments(
     task_id: int,
     current_user: CurrentUser,
     service: CommentServiceDep,
-) -> list[CommentResponse]:
-    """List comments on a task."""
+    pagination: PaginationDep,
+) -> PaginatedResponse[CommentResponse]:
+    """List paginated comments on a task."""
     return await service.list_comments(
         task_id=task_id,
         current_user=current_user,
+        pagination=pagination,
+    )
+
+
+@router.patch(
+    "/comments/{comment_id}",
+    response_model=CommentResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Update a comment",
+    description="Update comment content. Only the author or system admin can update.",
+    responses={
+        401: {"description": "Not authenticated"},
+        403: {"description": "Permission denied (cannot update someone else's comment)"},
+        404: {"description": "Comment not found"},
+        409: {"description": "Project is archived"},
+        422: {"description": "Validation error"},
+    },
+)
+async def update_comment(
+    comment_id: int,
+    data: CommentUpdate,
+    current_user: CurrentUser,
+    service: CommentServiceDep,
+) -> CommentResponse:
+    """Update a comment."""
+    return await service.update_comment(
+        comment_id=comment_id,
+        current_user=current_user,
+        data=data,
     )
 
 

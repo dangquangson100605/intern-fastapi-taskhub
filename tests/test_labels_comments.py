@@ -1,5 +1,6 @@
 """Unit, RBAC, and business logic tests for Labels and Comments."""
 
+import math
 from collections.abc import Generator, Sequence
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -7,6 +8,7 @@ from typing import Any, cast
 import httpx
 import pytest
 from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import get_settings
@@ -26,9 +28,10 @@ from app.core.dependencies import (
 )
 from app.core.messages import (
     ERROR_CANNOT_DELETE_OTHERS_COMMENT,
+    ERROR_CANNOT_UPDATE_OTHERS_COMMENT,
     ERROR_LABEL_ALREADY_ASSIGNED,
+    ERROR_LABEL_NAME_EXISTS,
     ERROR_LABEL_NOT_ASSIGNED,
-    ERROR_LABEL_PROJECT_MISMATCH,
     ERROR_PERMISSION_DENIED,
     ERROR_PROJECT_ARCHIVED,
 )
@@ -39,10 +42,12 @@ from app.models.label import Label
 from app.models.project import Project
 from app.models.task import Task
 from app.models.workspace import Workspace
+from app.repositories.base import PaginationResult
 from app.repositories.comment import CommentRepository
 from app.repositories.label import LabelRepository
 from app.repositories.project import ProjectRepository
 from app.repositories.task import TaskRepository
+from app.schemas.common import PaginationParams
 from app.services.comment import CommentService
 from app.services.label import LabelService
 from tests.conftest import (
@@ -136,9 +141,9 @@ class InMemoryTaskRepository(TaskRepository):
             due_date=due_date,
             created_at=datetime.now(UTC).replace(tzinfo=None),
         )
-        t.creator = self.user_repo._users.get(created_by)  # type: ignore[assignment]
+        t.creator = cast(Any, self.user_repo._users.get(created_by))
         if assignee_id is not None:
-            t.assignee = self.user_repo._users.get(assignee_id)  # type: ignore[assignment]
+            t.assignee = cast(Any, self.user_repo._users.get(assignee_id))
         self._tasks[self._next_id] = t
         self._next_id += 1
         return t
@@ -179,6 +184,13 @@ class InMemoryLabelRepository(LabelRepository):
         name: str,
         color: str = DEFAULT_LABEL_COLOR,
     ) -> Label:
+        for existing in self._labels.values():
+            if existing.project_id == project_id and existing.name == name:
+                raise IntegrityError(
+                    "Duplicate entry for key uq_labels_project_name",
+                    params=None,
+                    orig=Exception("uq_labels_project_name"),
+                )
         lbl = Label(
             id=self._next_id,
             project_id=project_id,
@@ -193,6 +205,12 @@ class InMemoryLabelRepository(LabelRepository):
     async def get_by_id(self, record_id: int) -> Label | None:
         return self._labels.get(record_id)
 
+    async def get_in_project(self, label_id: int, project_id: int) -> Label | None:
+        lbl = self._labels.get(label_id)
+        if lbl is None or lbl.project_id != project_id:
+            return None
+        return lbl
+
     async def get_with_project_and_workspace_role(
         self, label_id: int, user_id: int
     ) -> tuple[Label, Project, WorkspaceRole | None] | None:
@@ -205,19 +223,49 @@ class InMemoryLabelRepository(LabelRepository):
         project, role = resolved
         return label, project, role
 
-    async def list_by_project(self, project_id: int) -> Sequence[Label]:
-        return [lbl for lbl in self._labels.values() if lbl.project_id == project_id]
+    async def list_by_project(
+        self, project_id: int, pagination: PaginationParams
+    ) -> PaginationResult[Label]:
+        matched = [lbl for lbl in self._labels.values() if lbl.project_id == project_id]
+        matched.sort(key=lambda lbl: (lbl.created_at, lbl.id))
+        total = len(matched)
+        paged = matched[pagination.offset : pagination.offset + pagination.limit]
+        return PaginationResult(
+            items=paged,
+            total=total,
+            page=pagination.page,
+            limit=pagination.limit,
+            total_pages=math.ceil(total / pagination.limit) if pagination.limit > 0 else 0,
+        )
 
-    async def list_by_workspace(self, workspace_id: int) -> Sequence[Label]:
+    async def list_by_workspace(
+        self, workspace_id: int, pagination: PaginationParams
+    ) -> PaginationResult[Label]:
         project_ids = {
             p.id for p in self.project_repo._projects.values() if p.workspace_id == workspace_id
         }
-        return [lbl for lbl in self._labels.values() if lbl.project_id in project_ids]
+        matched = [lbl for lbl in self._labels.values() if lbl.project_id in project_ids]
+        matched.sort(key=lambda lbl: (lbl.created_at, lbl.id))
+        total = len(matched)
+        paged = matched[pagination.offset : pagination.offset + pagination.limit]
+        return PaginationResult(
+            items=paged,
+            total=total,
+            page=pagination.page,
+            limit=pagination.limit,
+            total_pages=math.ceil(total / pagination.limit) if pagination.limit > 0 else 0,
+        )
 
     async def is_assigned_to_task(self, task_id: int, label_id: int) -> bool:
         return (task_id, label_id) in self._task_labels
 
     async def assign_to_task(self, task_id: int, label_id: int) -> None:
+        if (task_id, label_id) in self._task_labels:
+            raise IntegrityError(
+                "Duplicate entry for key PRIMARY",
+                params=None,
+                orig=Exception("PRIMARY"),
+            )
         self._task_labels.add((task_id, label_id))
 
     async def remove_from_task(self, task_id: int, label_id: int) -> bool:
@@ -266,7 +314,7 @@ class InMemoryCommentRepository(CommentRepository):
             content=content,
             created_at=datetime.now(UTC).replace(tzinfo=None),
         )
-        c.author = self.user_repo._users.get(author_id)  # type: ignore[assignment]
+        c.author = cast(Any, self.user_repo._users.get(author_id))
         self._comments[self._next_id] = c
         self._next_id += 1
         return c
@@ -274,10 +322,20 @@ class InMemoryCommentRepository(CommentRepository):
     async def get_by_id(self, record_id: int) -> Comment | None:
         return self._comments.get(record_id)
 
-    async def list_by_task(self, task_id: int) -> Sequence[Comment]:
+    async def list_by_task(
+        self, task_id: int, pagination: PaginationParams
+    ) -> PaginationResult[Comment]:
         matched = [c for c in self._comments.values() if c.task_id == task_id]
         matched.sort(key=lambda c: (c.created_at, c.id))
-        return matched
+        total = len(matched)
+        paged = matched[pagination.offset : pagination.offset + pagination.limit]
+        return PaginationResult(
+            items=paged,
+            total=total,
+            page=pagination.page,
+            limit=pagination.limit,
+            total_pages=math.ceil(total / pagination.limit) if pagination.limit > 0 else 0,
+        )
 
     async def get_with_task_and_workspace_role(
         self, comment_id: int, user_id: int
@@ -300,11 +358,33 @@ class InMemoryCommentRepository(CommentRepository):
         return False
 
 
+class LabelCommentFakeAsyncSession(FakeAsyncSession):
+    """In-memory async session simulating unique constraint checks on commit."""
+
+    def __init__(self, label_repo: InMemoryLabelRepository) -> None:
+        super().__init__()
+        self.label_repo = label_repo
+
+    async def commit(self) -> None:
+        await super().commit()
+        seen: set[tuple[int, str]] = set()
+        for lbl in self.label_repo._labels.values():
+            key = (lbl.project_id, lbl.name)
+            if key in seen:
+                raise IntegrityError(
+                    "Duplicate entry for key uq_labels_project_name",
+                    params=None,
+                    orig=Exception("uq_labels_project_name"),
+                )
+            seen.add(key)
+
+
 class LabelCommentTestContext:
     """Encapsulates test repositories, services, and actor accounts."""
 
     def __init__(self) -> None:
-        self.session = cast(AsyncSession, FakeAsyncSession())
+        self.label_repo = InMemoryLabelRepository(cast(AsyncSession, None), cast(Any, None))
+        self.session = cast(AsyncSession, LabelCommentFakeAsyncSession(self.label_repo))
         self.user_repo = InMemoryUserRepository(self.session)
         self.member_repo = InMemoryWorkspaceMemberRepository(self.session, self.user_repo)
         self.workspace_repo = InMemoryWorkspaceRepository(self.session, self.member_repo)
@@ -312,7 +392,8 @@ class LabelCommentTestContext:
             self.session, self.workspace_repo, self.member_repo
         )
         self.task_repo = InMemoryTaskRepository(self.session, self.project_repo, self.user_repo)
-        self.label_repo = InMemoryLabelRepository(self.session, self.project_repo)
+        self.label_repo.session = self.session
+        self.label_repo.project_repo = self.project_repo
         self.comment_repo = InMemoryCommentRepository(
             self.session, self.task_repo, self.user_repo
         )
@@ -360,6 +441,7 @@ async def _seed_workspace_project_and_task(
     ctx: LabelCommentTestContext,
 ) -> tuple[Workspace, Project, Task]:
     """Helper creating a workspace with members, active project, and a task."""
+    await ctx.workspace_repo.create(name="Preceding Workspace", owner_id=ctx.owner.id)
     ws = await ctx.workspace_repo.create(name="Product Workspace", owner_id=ctx.owner.id)
     await ctx.member_repo.add_member(ws.id, ctx.owner.id, role=WorkspaceRole.OWNER)
     await ctx.member_repo.add_member(ws.id, ctx.editor.id, role=WorkspaceRole.EDITOR)
@@ -397,6 +479,47 @@ async def test_create_label_valid_hex_color_succeeds(
     assert data["name"] == "Bug"
     assert data["color"] == "#EF4444"
     assert data["project_id"] == project.id
+
+
+@pytest.mark.anyio
+async def test_create_duplicate_label_name_in_project_returns_409(
+    client: httpx.AsyncClient, lc_ctx: LabelCommentTestContext
+) -> None:
+    """Verify that creating two labels with the same name in the same project returns 409 Conflict."""
+    _, project, _ = await _seed_workspace_project_and_task(lc_ctx)
+    app.dependency_overrides[get_current_user] = lambda: lc_ctx.editor
+
+    resp1 = await client.post(
+        f"/api/v1/projects/{project.id}/labels",
+        json={"name": "Bug", "color": "#EF4444"},
+    )
+    assert resp1.status_code == 201
+
+    resp2 = await client.post(
+        f"/api/v1/projects/{project.id}/labels",
+        json={"name": "Bug", "color": "#3B82F6"},
+    )
+    assert resp2.status_code == 409
+    assert resp2.json()["message"] == ERROR_LABEL_NAME_EXISTS
+
+
+@pytest.mark.anyio
+async def test_update_label_duplicate_name_returns_409(
+    client: httpx.AsyncClient, lc_ctx: LabelCommentTestContext
+) -> None:
+    """Verify that updating a label to a name already used in the same project returns 409 Conflict."""
+    _, project, _ = await _seed_workspace_project_and_task(lc_ctx)
+    app.dependency_overrides[get_current_user] = lambda: lc_ctx.editor
+
+    lbl1 = await lc_ctx.label_repo.create_label(project.id, "Bug", "#EF4444")
+    lbl2 = await lc_ctx.label_repo.create_label(project.id, "Feature", "#10B981")
+
+    resp = await client.patch(
+        f"/api/v1/labels/{lbl2.id}",
+        json={"name": lbl1.name},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["message"] == ERROR_LABEL_NAME_EXISTS
 
 
 @pytest.mark.anyio
@@ -466,11 +589,11 @@ async def test_assign_label_to_task_succeeds_and_duplicate_returns_409(
 
 
 @pytest.mark.anyio
-async def test_assign_cross_project_label_returns_400(
+async def test_assign_cross_project_label_returns_404(
     client: httpx.AsyncClient, lc_ctx: LabelCommentTestContext
 ) -> None:
-    """Verify that assigning a label from Project B to a task in Project A returns 400 Bad Request."""
-    ws, project_a, task_a = await _seed_workspace_project_and_task(lc_ctx)
+    """Verify assigning a label from Project B to Project A task returns 404 to avoid ID disclosure."""
+    ws, _, task_a = await _seed_workspace_project_and_task(lc_ctx)
     project_b = await lc_ctx.project_repo.create(
         workspace_id=ws.id, name="Project B", status=ProjectStatus.ACTIVE
     )
@@ -479,8 +602,7 @@ async def test_assign_cross_project_label_returns_400(
     app.dependency_overrides[get_current_user] = lambda: lc_ctx.editor
 
     response = await client.post(f"/api/v1/tasks/{task_a.id}/labels/{label_b.id}")
-    assert response.status_code == 400
-    assert response.json()["message"] == ERROR_LABEL_PROJECT_MISMATCH
+    assert response.status_code == 404
 
 
 @pytest.mark.anyio
@@ -500,6 +622,27 @@ async def test_remove_label_from_task(
     not_assigned = await client.delete(f"/api/v1/tasks/{task.id}/labels/{label.id}")
     assert not_assigned.status_code == 404
     assert not_assigned.json()["message"] == ERROR_LABEL_NOT_ASSIGNED
+
+
+@pytest.mark.anyio
+async def test_list_project_labels_pagination(
+    client: httpx.AsyncClient, lc_ctx: LabelCommentTestContext
+) -> None:
+    """Verify project label listing supports pagination parameters."""
+    _, project, _ = await _seed_workspace_project_and_task(lc_ctx)
+    for i in range(4):
+        await lc_ctx.label_repo.create_label(project.id, f"Label {i}", "#10B981")
+
+    app.dependency_overrides[get_current_user] = lambda: lc_ctx.editor
+
+    response = await client.get(f"/api/v1/projects/{project.id}/labels?page=1&limit=2")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 4
+    assert data["page"] == 1
+    assert data["limit"] == 2
+    assert data["total_pages"] == 2
+    assert len(data["items"]) == 2
 
 
 @pytest.mark.anyio
@@ -528,6 +671,37 @@ async def test_create_comment_succeeds_and_empty_content_returns_422(
 
 
 @pytest.mark.anyio
+async def test_create_comment_viewer_returns_403(
+    client: httpx.AsyncClient, lc_ctx: LabelCommentTestContext
+) -> None:
+    """Verify that workspace VIEWER is forbidden from creating comments."""
+    _, _, task = await _seed_workspace_project_and_task(lc_ctx)
+    app.dependency_overrides[get_current_user] = lambda: lc_ctx.viewer
+
+    response = await client.post(
+        f"/api/v1/tasks/{task.id}/comments",
+        json={"content": "Viewer comment attempt"},
+    )
+    assert response.status_code == 403
+    assert response.json()["message"] == ERROR_PERMISSION_DENIED
+
+
+@pytest.mark.anyio
+async def test_create_comment_outsider_returns_404(
+    client: httpx.AsyncClient, lc_ctx: LabelCommentTestContext
+) -> None:
+    """Verify that user outside workspace receives 404 Not Found to prevent resource enumeration."""
+    _, _, task = await _seed_workspace_project_and_task(lc_ctx)
+    app.dependency_overrides[get_current_user] = lambda: lc_ctx.outsider
+
+    response = await client.post(
+        f"/api/v1/tasks/{task.id}/comments",
+        json={"content": "Outsider comment attempt"},
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.anyio
 async def test_list_comments_chronological_order(
     client: httpx.AsyncClient, lc_ctx: LabelCommentTestContext
 ) -> None:
@@ -540,10 +714,99 @@ async def test_list_comments_chronological_order(
 
     response = await client.get(f"/api/v1/tasks/{task.id}/comments")
     assert response.status_code == 200
-    items = response.json()
+    data = response.json()
+    items = data["items"]
+    assert data["total"] == 2
     assert len(items) == 2
     assert items[0]["content"] == "First comment"
     assert items[1]["content"] == "Second comment"
+
+
+@pytest.mark.anyio
+async def test_list_comments_pagination(
+    client: httpx.AsyncClient, lc_ctx: LabelCommentTestContext
+) -> None:
+    """Verify comment listing supports pagination parameters (page, limit, total, total_pages)."""
+    _, _, task = await _seed_workspace_project_and_task(lc_ctx)
+    for i in range(5):
+        await lc_ctx.comment_repo.create_comment(task.id, lc_ctx.owner.id, f"Comment {i}")
+
+    app.dependency_overrides[get_current_user] = lambda: lc_ctx.editor
+
+    response = await client.get(f"/api/v1/tasks/{task.id}/comments?page=1&limit=2")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 5
+    assert data["page"] == 1
+    assert data["limit"] == 2
+    assert data["total_pages"] == 3
+    assert len(data["items"]) == 2
+    assert data["items"][0]["content"] == "Comment 0"
+    assert data["items"][1]["content"] == "Comment 1"
+
+    page2_resp = await client.get(f"/api/v1/tasks/{task.id}/comments?page=2&limit=2")
+    assert page2_resp.status_code == 200
+    page2_data = page2_resp.json()
+    assert len(page2_data["items"]) == 2
+    assert page2_data["items"][0]["content"] == "Comment 2"
+
+
+@pytest.mark.anyio
+async def test_update_comment_author_and_admin_succeeds_non_author_editor_returns_403(
+    client: httpx.AsyncClient, lc_ctx: LabelCommentTestContext
+) -> None:
+    """Verify author and admin can update comment, while other editors are forbidden."""
+    ws, _, task = await _seed_workspace_project_and_task(lc_ctx)
+    comment = await lc_ctx.comment_repo.create_comment(
+        task.id, lc_ctx.editor.id, "Original comment content"
+    )
+
+    other_user = lc_ctx.user_repo.add_test_user(98, "other_editor_2@example.com")
+    await lc_ctx.member_repo.add_member(ws.id, other_user.id, role=WorkspaceRole.EDITOR)
+    app.dependency_overrides[get_current_user] = lambda: other_user
+
+    forbidden_resp = await client.patch(
+        f"/api/v1/comments/{comment.id}",
+        json={"content": "Malicious edit"},
+    )
+    assert forbidden_resp.status_code == 403
+    assert forbidden_resp.json()["message"] == ERROR_CANNOT_UPDATE_OTHERS_COMMENT
+
+    app.dependency_overrides[get_current_user] = lambda: lc_ctx.editor
+    author_resp = await client.patch(
+        f"/api/v1/comments/{comment.id}",
+        json={"content": "Author updated content"},
+    )
+    assert author_resp.status_code == 200
+    assert author_resp.json()["content"] == "Author updated content"
+
+    app.dependency_overrides[get_current_user] = lambda: lc_ctx.admin
+    admin_resp = await client.patch(
+        f"/api/v1/comments/{comment.id}",
+        json={"content": "Admin updated content"},
+    )
+    assert admin_resp.status_code == 200
+    assert admin_resp.json()["content"] == "Admin updated content"
+
+
+@pytest.mark.anyio
+async def test_update_comment_archived_project_returns_409(
+    client: httpx.AsyncClient, lc_ctx: LabelCommentTestContext
+) -> None:
+    """Verify updating a comment in an archived project returns 409 Conflict."""
+    _, project, task = await _seed_workspace_project_and_task(lc_ctx)
+    comment = await lc_ctx.comment_repo.create_comment(
+        task.id, lc_ctx.editor.id, "Comment before archive"
+    )
+    project.status = ProjectStatus.ARCHIVED
+    app.dependency_overrides[get_current_user] = lambda: lc_ctx.editor
+
+    response = await client.patch(
+        f"/api/v1/comments/{comment.id}",
+        json={"content": "Attempted edit after archive"},
+    )
+    assert response.status_code == 409
+    assert response.json()["message"] == ERROR_PROJECT_ARCHIVED
 
 
 @pytest.mark.anyio
@@ -551,14 +814,14 @@ async def test_comment_deletion_authorization_rules(
     client: httpx.AsyncClient, lc_ctx: LabelCommentTestContext
 ) -> None:
     """Verify that author, workspace owner, and admin can delete comments, but other editors cannot."""
-    _, _, task = await _seed_workspace_project_and_task(lc_ctx)
+    ws, _, task = await _seed_workspace_project_and_task(lc_ctx)
 
     author_comment = await lc_ctx.comment_repo.create_comment(
         task.id, lc_ctx.editor.id, "Comment by editor"
     )
 
     other_user = lc_ctx.user_repo.add_test_user(99, "other_editor@example.com")
-    await lc_ctx.member_repo.add_member(task.project_id, other_user.id, role=WorkspaceRole.EDITOR)
+    await lc_ctx.member_repo.add_member(ws.id, other_user.id, role=WorkspaceRole.EDITOR)
     app.dependency_overrides[get_current_user] = lambda: other_user
 
     forbidden_resp = await client.delete(f"/api/v1/comments/{author_comment.id}")
@@ -582,6 +845,26 @@ async def test_comment_deletion_authorization_rules(
     app.dependency_overrides[get_current_user] = lambda: lc_ctx.admin
     admin_delete = await client.delete(f"/api/v1/comments/{admin_test_comment.id}")
     assert admin_delete.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_delete_comment_archived_project_non_author_returns_403(
+    client: httpx.AsyncClient, lc_ctx: LabelCommentTestContext
+) -> None:
+    """Verify non-author editor gets 403 Forbidden (not 409) when trying to delete in archived project."""
+    ws, project, task = await _seed_workspace_project_and_task(lc_ctx)
+    comment = await lc_ctx.comment_repo.create_comment(
+        task.id, lc_ctx.editor.id, "Editor comment"
+    )
+    project.status = ProjectStatus.ARCHIVED
+
+    other_user = lc_ctx.user_repo.add_test_user(97, "other_editor_3@example.com")
+    await lc_ctx.member_repo.add_member(ws.id, other_user.id, role=WorkspaceRole.EDITOR)
+    app.dependency_overrides[get_current_user] = lambda: other_user
+
+    response = await client.delete(f"/api/v1/comments/{comment.id}")
+    assert response.status_code == 403
+    assert response.json()["message"] == ERROR_CANNOT_DELETE_OTHERS_COMMENT
 
 
 @pytest.mark.anyio
@@ -668,6 +951,10 @@ async def test_real_label_and_comment_repository_integration() -> None:
             assert resolved_label is not None
             assert resolved_label[0].id == label.id
 
+            in_project_label = await label_repo.get_in_project(label.id, test_proj_id)
+            assert in_project_label is not None
+            assert in_project_label.id == label.id
+
             task = await task_repo.create_task(
                 project_id=test_proj_id,
                 created_by=test_uid,
@@ -701,8 +988,15 @@ async def test_real_label_and_comment_repository_integration() -> None:
             assert resolved_comment is not None
             assert resolved_comment[0].id == comment.id
 
-            task_comments = await comment_repo.list_by_task(task.id)
-            assert any(c.id == comment.id for c in task_comments)
+            task_comments = await comment_repo.list_by_task(
+                task.id, PaginationParams(page=1, limit=10)
+            )
+            assert any(c.id == comment.id for c in task_comments.items)
+
+            proj_labels = await label_repo.list_by_project(
+                test_proj_id, PaginationParams(page=1, limit=10)
+            )
+            assert any(lbl.id == label.id for lbl in proj_labels.items)
         finally:
             await session.rollback()
             await engine.dispose()

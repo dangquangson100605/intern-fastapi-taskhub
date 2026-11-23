@@ -1,5 +1,6 @@
 """Label repository handling label queries, workspace joins, and task association."""
 
+import math
 from collections.abc import Sequence
 from typing import Any, cast
 
@@ -10,7 +11,8 @@ from app.models.enums import WorkspaceRole
 from app.models.label import Label, task_labels
 from app.models.project import Project
 from app.models.workspace import Workspace, WorkspaceMember
-from app.repositories.base import BaseRepository
+from app.repositories.base import BaseRepository, PaginationResult
+from app.schemas.common import PaginationParams
 
 
 class LabelRepository(BaseRepository[Label]):
@@ -32,8 +34,18 @@ class LabelRepository(BaseRepository[Label]):
         )
         self.session.add(instance)
         await self.session.flush()
-        await self.session.refresh(instance)
         return instance
+
+    async def get_in_project(self, label_id: int, project_id: int) -> Label | None:
+        """Fetch a label scoped to a specific project to avoid cross-workspace enumeration."""
+        query = select(Label).where(
+            and_(
+                Label.id == label_id,
+                Label.project_id == project_id,
+            )
+        )
+        result = await self.session.execute(query)
+        return result.scalars().first()
 
     async def get_with_project_and_workspace_role(
         self,
@@ -63,22 +75,62 @@ class LabelRepository(BaseRepository[Label]):
         effective_role = WorkspaceRole.OWNER if owner_id == user_id else member_role
         return label, project, effective_role
 
-    async def list_by_project(self, project_id: int) -> Sequence[Label]:
-        """Fetch all labels belonging to a specific project ordered by id ascending."""
-        query = select(Label).where(Label.project_id == project_id).order_by(Label.id.asc())
-        result = await self.session.execute(query)
-        return result.scalars().all()
+    async def list_by_project(
+        self, project_id: int, pagination: PaginationParams
+    ) -> PaginationResult[Label]:
+        """Fetch paginated labels belonging to a specific project ordered by id ascending."""
+        count_query = select(func.count(Label.id)).where(Label.project_id == project_id)
+        total_result = await self.session.execute(count_query)
+        total = total_result.scalar() or 0
 
-    async def list_by_workspace(self, workspace_id: int) -> Sequence[Label]:
-        """Fetch all labels belonging to any project within a workspace."""
-        query = (
+        data_query = (
+            select(Label)
+            .where(Label.project_id == project_id)
+            .order_by(Label.id.asc())
+            .offset(pagination.offset)
+            .limit(pagination.limit)
+        )
+        result = await self.session.execute(data_query)
+        items = list(result.scalars().all())
+
+        return PaginationResult(
+            items=items,
+            total=total,
+            page=pagination.page,
+            limit=pagination.limit,
+            total_pages=math.ceil(total / pagination.limit) if pagination.limit > 0 else 0,
+        )
+
+    async def list_by_workspace(
+        self, workspace_id: int, pagination: PaginationParams
+    ) -> PaginationResult[Label]:
+        """Fetch paginated labels belonging to any project within a workspace."""
+        count_query = (
+            select(func.count(Label.id))
+            .join(Project, Label.project_id == Project.id)
+            .where(Project.workspace_id == workspace_id)
+        )
+        total_result = await self.session.execute(count_query)
+        total = total_result.scalar() or 0
+
+        data_query = (
             select(Label)
             .join(Project, Label.project_id == Project.id)
             .where(Project.workspace_id == workspace_id)
             .order_by(Label.id.asc())
+            .offset(pagination.offset)
+            .limit(pagination.limit)
         )
-        result = await self.session.execute(query)
-        return result.scalars().all()
+        result = await self.session.execute(data_query)
+        items = list(result.scalars().all())
+
+        return PaginationResult(
+            items=items,
+            total=total,
+            page=pagination.page,
+            limit=pagination.limit,
+            total_pages=math.ceil(total / pagination.limit) if pagination.limit > 0 else 0,
+        )
 
     async def is_assigned_to_task(self, task_id: int, label_id: int) -> bool:
         """Check whether a task currently has the specified label attached."""

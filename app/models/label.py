@@ -2,7 +2,7 @@
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Column, ForeignKey, String, Table
+from sqlalchemy import Column, ForeignKey, String, Table, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.constants import (
@@ -28,6 +28,9 @@ class Label(Base):
     """A label belongs to a project and can be attached to tasks."""
 
     __tablename__ = "labels"
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", name="uq_labels_project_name"),
+    )
 
     project_id: Mapped[int] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"),

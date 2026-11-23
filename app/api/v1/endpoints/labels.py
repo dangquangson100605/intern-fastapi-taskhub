@@ -2,8 +2,8 @@
 
 from fastapi import APIRouter, status
 
-from app.core.dependencies import CurrentUser, LabelServiceDep
-from app.schemas.common import MessageResponse
+from app.core.dependencies import CurrentUser, LabelServiceDep, PaginationDep
+from app.schemas.common import MessageResponse, PaginatedResponse
 from app.schemas.label import LabelCreate, LabelResponse, LabelUpdate
 
 router = APIRouter(tags=["Labels"])
@@ -19,7 +19,7 @@ router = APIRouter(tags=["Labels"])
         401: {"description": "Not authenticated"},
         403: {"description": "Permission denied"},
         404: {"description": "Project not found"},
-        409: {"description": "Project is archived"},
+        409: {"description": "Project is archived or label name exists in project"},
         422: {"description": "Validation error (invalid color or name length)"},
     },
 )
@@ -39,10 +39,10 @@ async def create_project_label(
 
 @router.get(
     "/projects/{project_id}/labels",
-    response_model=list[LabelResponse],
+    response_model=PaginatedResponse[LabelResponse],
     status_code=status.HTTP_200_OK,
     summary="List labels in a project",
-    description="Retrieve all labels created in a project. Accessible to all workspace members.",
+    description="Retrieve paginated labels created in a project. Accessible to all workspace members.",
     responses={
         401: {"description": "Not authenticated"},
         404: {"description": "Project not found"},
@@ -52,20 +52,22 @@ async def list_project_labels(
     project_id: int,
     current_user: CurrentUser,
     service: LabelServiceDep,
-) -> list[LabelResponse]:
+    pagination: PaginationDep,
+) -> PaginatedResponse[LabelResponse]:
     """List all labels belonging to a project."""
     return await service.list_project_labels(
         project_id=project_id,
         current_user=current_user,
+        pagination=pagination,
     )
 
 
 @router.get(
     "/workspaces/{workspace_id}/labels",
-    response_model=list[LabelResponse],
+    response_model=PaginatedResponse[LabelResponse],
     status_code=status.HTTP_200_OK,
     summary="List labels in a workspace",
-    description="Retrieve all labels across all projects in a workspace. Accessible to all members.",
+    description="Retrieve paginated labels across all projects in a workspace. Accessible to all members.",
     responses={
         401: {"description": "Not authenticated"},
         404: {"description": "Workspace not found"},
@@ -75,11 +77,13 @@ async def list_workspace_labels(
     workspace_id: int,
     current_user: CurrentUser,
     service: LabelServiceDep,
-) -> list[LabelResponse]:
+    pagination: PaginationDep,
+) -> PaginatedResponse[LabelResponse]:
     """List all labels in a workspace."""
     return await service.list_workspace_labels(
         workspace_id=workspace_id,
         current_user=current_user,
+        pagination=pagination,
     )
 
 
@@ -93,7 +97,7 @@ async def list_workspace_labels(
         401: {"description": "Not authenticated"},
         403: {"description": "Permission denied"},
         404: {"description": "Label not found"},
-        409: {"description": "Project is archived"},
+        409: {"description": "Project is archived or label name exists in project"},
         422: {"description": "Validation error"},
     },
 )
@@ -143,7 +147,6 @@ async def delete_label(
     summary="Assign a label to a task",
     description="Attach a label to a task. Enforces same-project scope and prevents duplicate assignment.",
     responses={
-        400: {"description": "Label does not belong to the same project"},
         401: {"description": "Not authenticated"},
         403: {"description": "Permission denied"},
         404: {"description": "Task or label not found"},
