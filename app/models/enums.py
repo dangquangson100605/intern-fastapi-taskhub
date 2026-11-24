@@ -2,7 +2,9 @@
 
 from app.core.enums import (
     ProjectStatus,
+    SortOrder,
     TaskPriority,
+    TaskSortBy,
     TaskStatus,
     TokenType,
     UserRole,
@@ -11,7 +13,9 @@ from app.core.enums import (
 
 __all__ = [
     "ProjectStatus",
+    "SortOrder",
     "TaskPriority",
+    "TaskSortBy",
     "TaskStatus",
     "TokenType",
     "UserRole",

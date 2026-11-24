@@ -1,9 +1,11 @@
-"""Task service orchestrating task management, RBAC, and assignee validation."""
+"""Task service orchestrating task management, RBAC, filtering, and cache invalidation."""
 
 from collections.abc import Sequence
+from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache import CacheService
 from app.core.constants import (
     RESOURCE_PROJECT,
     RESOURCE_TASK,
@@ -22,7 +24,15 @@ from app.core.messages import (
     ERROR_PERMISSION_DENIED,
     ERROR_PROJECT_ARCHIVED,
 )
-from app.models.enums import ProjectStatus, TaskPriority, TaskStatus, UserRole, WorkspaceRole
+from app.models.enums import (
+    ProjectStatus,
+    SortOrder,
+    TaskPriority,
+    TaskSortBy,
+    TaskStatus,
+    UserRole,
+    WorkspaceRole,
+)
 from app.models.project import Project
 from app.models.task import Task
 from app.models.user import User
@@ -36,7 +46,7 @@ from app.schemas.task import TaskCreate, TaskResponse, TaskStatusUpdate, TaskUpd
 
 
 class TaskService:
-    """Service managing task lifecycle, state transitions, and workspace validation."""
+    """Service managing task lifecycle, state transitions, caching, and workspace validation."""
 
     def __init__(
         self,
@@ -46,6 +56,7 @@ class TaskService:
         workspace_repo: WorkspaceRepository,
         member_repo: WorkspaceMemberRepository,
         user_repo: UserRepository,
+        cache_service: CacheService | None = None,
     ) -> None:
         self.session = session
         self.task_repo = task_repo
@@ -53,6 +64,7 @@ class TaskService:
         self.workspace_repo = workspace_repo
         self.member_repo = member_repo
         self.user_repo = user_repo
+        self.cache_service = cache_service
 
     async def _validate_assignee_in_workspace(
         self,
@@ -130,7 +142,7 @@ class TaskService:
         current_user: User,
         data: TaskCreate,
     ) -> TaskResponse:
-        """Create a new task in a project verifying write role before checking archive status."""
+        """Create a new task in a project verifying write role and invalidating project cache."""
         project = await self._get_project_for_create_task(
             project_id=project_id,
             current_user=current_user,
@@ -154,6 +166,10 @@ class TaskService:
         await self.session.commit()
         await self.session.refresh(task)
         await self.session.refresh(task, attribute_names=["creator", "assignee"])
+
+        if self.cache_service is not None:
+            await self.cache_service.invalidate_project_tasks(project_id)
+
         return TaskResponse.model_validate(task)
 
     async def list_tasks(
@@ -161,11 +177,17 @@ class TaskService:
         project_id: int,
         current_user: User,
         pagination: PaginationParams,
+        search: str | None = None,
         statuses: Sequence[TaskStatus] | None = None,
         priorities: Sequence[TaskPriority] | None = None,
         assignee_id: int | None = None,
+        due_date_from: datetime | None = None,
+        due_date_to: datetime | None = None,
+        label_id: int | None = None,
+        sort_by: TaskSortBy = TaskSortBy.CREATED_AT,
+        sort_order: SortOrder = SortOrder.DESC,
     ) -> PaginatedResponse[TaskResponse]:
-        """List tasks within a project ensuring caller is a member."""
+        """List tasks with dynamic filters, sorting, and transparent Redis caching."""
         resolved = await self.project_repo.get_with_workspace_role(
             project_id=project_id,
             user_id=current_user.id,
@@ -177,20 +199,70 @@ class TaskService:
         if current_user.role != UserRole.ADMIN and role is None:
             raise NotFoundException(RESOURCE_PROJECT)
 
+        norm_due_from = None
+        if due_date_from is not None:
+            norm_due_from = (
+                due_date_from.astimezone(UTC).replace(tzinfo=None)
+                if due_date_from.tzinfo is not None
+                else due_date_from
+            )
+
+        norm_due_to = None
+        if due_date_to is not None:
+            norm_due_to = (
+                due_date_to.astimezone(UTC).replace(tzinfo=None)
+                if due_date_to.tzinfo is not None
+                else due_date_to
+            )
+
+        cache_key = None
+        if self.cache_service is not None:
+            query_parts = {
+                "search": search or "",
+                "statuses": sorted([s.value for s in statuses]) if statuses else [],
+                "priorities": sorted([p.value for p in priorities]) if priorities else [],
+                "assignee_id": assignee_id,
+                "due_date_from": norm_due_from.isoformat() if norm_due_from else None,
+                "due_date_to": norm_due_to.isoformat() if norm_due_to else None,
+                "label_id": label_id,
+                "sort_by": sort_by.value,
+                "sort_order": sort_order.value,
+            }
+            cache_key = self.cache_service.build_project_tasks_cache_key(
+                project_id=project_id,
+                page=pagination.page,
+                limit=pagination.limit,
+                query_parts=query_parts,
+            )
+            cached_data = await self.cache_service.get(cache_key)
+            if cached_data is not None:
+                return PaginatedResponse[TaskResponse].model_validate(cached_data)
+
         result = await self.task_repo.list_by_project(
             project_id=project_id,
             pagination=pagination,
+            search=search,
             statuses=statuses,
             priorities=priorities,
             assignee_id=assignee_id,
+            due_date_from=norm_due_from,
+            due_date_to=norm_due_to,
+            label_id=label_id,
+            sort_by=sort_by,
+            sort_order=sort_order,
         )
-        return PaginatedResponse[TaskResponse](
+        response = PaginatedResponse[TaskResponse](
             items=[TaskResponse.model_validate(t) for t in result.items],
             total=result.total,
             page=result.page,
             limit=result.limit,
             total_pages=result.total_pages,
         )
+
+        if self.cache_service is not None and cache_key is not None:
+            await self.cache_service.set(cache_key, response.model_dump(mode="json"))
+
+        return response
 
     async def get_task(
         self,
@@ -217,7 +289,7 @@ class TaskService:
         current_user: User,
         data: TaskUpdate,
     ) -> TaskResponse:
-        """Update task attributes enforcing write permissions and allowing field unsetting."""
+        """Update task attributes and invalidate project task caches."""
         task, project, _ = await self._get_task_for_write(
             task_id=task_id,
             current_user=current_user,
@@ -243,6 +315,10 @@ class TaskService:
         await self.session.commit()
         await self.session.refresh(task)
         await self.session.refresh(task, attribute_names=["creator", "assignee"])
+
+        if self.cache_service is not None:
+            await self.cache_service.invalidate_project_tasks(project.id)
+
         return TaskResponse.model_validate(task)
 
     async def update_task_status(
@@ -251,7 +327,7 @@ class TaskService:
         current_user: User,
         data: TaskStatusUpdate,
     ) -> TaskResponse:
-        """Fast status transition enforcing write role before archive validation."""
+        """Fast status transition and cache invalidation."""
         task, _, _ = await self._get_task_for_write(
             task_id=task_id,
             current_user=current_user,
@@ -262,6 +338,10 @@ class TaskService:
         await self.session.commit()
         await self.session.refresh(task)
         await self.session.refresh(task, attribute_names=["creator", "assignee"])
+
+        if self.cache_service is not None:
+            await self.cache_service.invalidate_project_tasks(task.project_id)
+
         return TaskResponse.model_validate(task)
 
     async def delete_task(
@@ -269,12 +349,16 @@ class TaskService:
         task_id: int,
         current_user: User,
     ) -> None:
-        """Delete task verifying write role and non-archived project status."""
-        await self._get_task_for_write(
+        """Delete task verifying write role and invalidating project cache."""
+        task, project, _ = await self._get_task_for_write(
             task_id=task_id,
             current_user=current_user,
             require_active_project=True,
         )
+        project_id = project.id
 
         await self.task_repo.delete(task_id)
         await self.session.commit()
+
+        if self.cache_service is not None:
+            await self.cache_service.invalidate_project_tasks(project_id)

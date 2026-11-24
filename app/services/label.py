@@ -3,6 +3,7 @@
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache import CacheService
 from app.core.constants import (
     RESOURCE_LABEL,
     RESOURCE_PROJECT,
@@ -46,6 +47,7 @@ class LabelService:
         task_repo: TaskRepository,
         workspace_repo: WorkspaceRepository,
         member_repo: WorkspaceMemberRepository,
+        cache_service: CacheService | None = None,
     ) -> None:
         self.session = session
         self.label_repo = label_repo
@@ -53,6 +55,7 @@ class LabelService:
         self.task_repo = task_repo
         self.workspace_repo = workspace_repo
         self.member_repo = member_repo
+        self.cache_service = cache_service
 
     async def _resolve_project_write_access(
         self,
@@ -253,6 +256,9 @@ class LabelService:
             await self.session.rollback()
             raise ConflictException(ERROR_LABEL_ALREADY_ASSIGNED) from exc
 
+        if self.cache_service is not None:
+            await self.cache_service.invalidate_project_tasks(task.project_id)
+
         return MessageResponse(message=SUCCESS_LABEL_ASSIGNED)
 
     async def remove_label_from_task(
@@ -262,13 +268,17 @@ class LabelService:
         current_user: User,
     ) -> MessageResponse:
         """Detach a label from a task enforcing write permissions in a single delete."""
-        await self._resolve_task_write_access(task_id, current_user)
+        task, _ = await self._resolve_task_write_access(task_id, current_user)
 
         deleted = await self.label_repo.remove_from_task(task_id, label_id)
         if not deleted:
             raise NotFoundException(message=ERROR_LABEL_NOT_ASSIGNED)
 
         await self.session.commit()
+
+        if self.cache_service is not None:
+            await self.cache_service.invalidate_project_tasks(task.project_id)
+
         return MessageResponse(message=SUCCESS_LABEL_REMOVED)
 
     async def list_task_labels(

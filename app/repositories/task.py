@@ -1,13 +1,15 @@
-"""Task repository handling queries, filtering, and single-join authorization."""
+"""Task repository handling queries, dynamic filtering, sorting, and single-join authorization."""
 
 import math
 from collections.abc import Sequence
 from datetime import datetime
+from typing import Any
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import selectinload
 
-from app.models.enums import TaskPriority, TaskStatus, WorkspaceRole
+from app.models.enums import SortOrder, TaskPriority, TaskSortBy, TaskStatus, WorkspaceRole
+from app.models.label import task_labels
 from app.models.project import Project
 from app.models.task import Task
 from app.models.workspace import Workspace, WorkspaceMember
@@ -16,7 +18,7 @@ from app.schemas.common import PaginationParams
 
 
 class TaskRepository(BaseRepository[Task]):
-    """Repository managing Task entity queries and lifecycle."""
+    """Repository managing Task entity queries, advanced filters, sorting, and lifecycle."""
 
     model = Task
 
@@ -53,28 +55,83 @@ class TaskRepository(BaseRepository[Task]):
         self,
         project_id: int,
         pagination: PaginationParams,
+        search: str | None = None,
         statuses: Sequence[TaskStatus] | None = None,
         priorities: Sequence[TaskPriority] | None = None,
         assignee_id: int | None = None,
+        due_date_from: datetime | None = None,
+        due_date_to: datetime | None = None,
+        label_id: int | None = None,
+        sort_by: TaskSortBy = TaskSortBy.CREATED_AT,
+        sort_order: SortOrder = SortOrder.DESC,
     ) -> PaginationResult[Task]:
-        """Fetch filtered and paginated tasks for a project avoiding N+1 via selectinload."""
-        conditions = [Task.project_id == project_id]
+        """Fetch filtered, sorted, and paginated tasks for a project avoiding N+1 via selectinload."""
+        conditions: list[Any] = [Task.project_id == project_id]
+
+        if search:
+            escaped = (
+                search.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            pattern = f"%{escaped}%"
+            conditions.append(
+                or_(
+                    Task.title.ilike(pattern),
+                    Task.description.ilike(pattern),
+                )
+            )
+
         if statuses:
             conditions.append(Task.status.in_(statuses))
+
         if priorities:
             conditions.append(Task.priority.in_(priorities))
+
         if assignee_id is not None:
             conditions.append(Task.assignee_id == assignee_id)
+
+        if due_date_from is not None:
+            conditions.append(Task.due_date >= due_date_from)
+
+        if due_date_to is not None:
+            conditions.append(Task.due_date <= due_date_to)
+
+        if label_id is not None:
+            label_subquery = select(task_labels.c.task_id).where(task_labels.c.label_id == label_id)
+            conditions.append(Task.id.in_(label_subquery))
 
         count_query = select(func.count(Task.id)).where(*conditions)
         total_result = await self.session.execute(count_query)
         total = total_result.scalar() or 0
 
+        sort_expr: Any
+        if sort_by == TaskSortBy.PRIORITY:
+            priority_rank = case(
+                (Task.priority == TaskPriority.LOW, 1),
+                (Task.priority == TaskPriority.MEDIUM, 2),
+                (Task.priority == TaskPriority.HIGH, 3),
+                (Task.priority == TaskPriority.URGENT, 4),
+                else_=0,
+            )
+            sort_expr = priority_rank
+        elif sort_by == TaskSortBy.DUE_DATE:
+            sort_expr = Task.due_date
+        elif sort_by == TaskSortBy.TITLE:
+            sort_expr = Task.title
+        else:
+            sort_expr = Task.created_at
+
+        if sort_order == SortOrder.ASC:
+            order_clause = [sort_expr.asc(), Task.id.asc()]
+        else:
+            order_clause = [sort_expr.desc(), Task.id.desc()]
+
         data_query = (
             select(Task)
             .where(*conditions)
             .options(selectinload(Task.assignee), selectinload(Task.creator))
-            .order_by(Task.id.desc())
+            .order_by(*order_clause)
             .offset(pagination.offset)
             .limit(pagination.limit)
         )
@@ -112,5 +169,4 @@ class TaskRepository(BaseRepository[Task]):
         )
         self.session.add(instance)
         await self.session.flush()
-        await self.session.refresh(instance)
         return instance
