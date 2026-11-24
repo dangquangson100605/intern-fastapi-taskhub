@@ -721,8 +721,15 @@ async def test_real_workspace_and_member_repository_integration() -> None:
             ws_repo = WorkspaceRepository(session)
             member_repo = WorkspaceMemberRepository(session)
 
-            test_uid = 99991
-            test_member_uid = 99992
+            user_ids = list(
+                (await session.execute(text("SELECT id FROM users ORDER BY id ASC LIMIT 2")))
+                .scalars()
+                .all()
+            )
+            if len(user_ids) < 2:
+                pytest.skip("Integration test requires at least 2 users in the test database")
+
+            test_uid, test_member_uid = user_ids[0], user_ids[1]
             created_ws = await ws_repo.create(
                 name=f"Repo-Test-{uuid.uuid4().hex[:8]}",
                 owner_id=test_uid,
