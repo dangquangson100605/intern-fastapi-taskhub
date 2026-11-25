@@ -8,6 +8,7 @@ from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache import CacheService
 from app.core.constants import BEARER_TOKEN_TYPE
 from app.core.database import AsyncSessionLocal
 from app.core.exceptions import ForbiddenException, UnauthorizedException
@@ -243,6 +244,14 @@ def get_project_service(
 ProjectServiceDep = Annotated[ProjectService, Depends(get_project_service)]
 
 
+def get_cache_service() -> CacheService:
+    """Dependency: instantiate CacheService with shared Redis connection pool."""
+    return CacheService(redis_client)
+
+
+CacheServiceDep = Annotated[CacheService, Depends(get_cache_service)]
+
+
 def get_task_service(
     session: SessionDep,
     task_repo: TaskRepoDep,
@@ -250,6 +259,7 @@ def get_task_service(
     workspace_repo: WorkspaceRepoDep,
     member_repo: WorkspaceMemberRepoDep,
     user_repo: UserRepoDep,
+    cache_service: CacheServiceDep,
 ) -> TaskService:
     """Dependency: instantiate TaskService with repositories and database session."""
     return TaskService(
@@ -259,6 +269,7 @@ def get_task_service(
         workspace_repo=workspace_repo,
         member_repo=member_repo,
         user_repo=user_repo,
+        cache_service=cache_service,
     )
 
 
@@ -288,6 +299,7 @@ def get_label_service(
     task_repo: TaskRepoDep,
     workspace_repo: WorkspaceRepoDep,
     member_repo: WorkspaceMemberRepoDep,
+    cache_service: CacheServiceDep,
 ) -> LabelService:
     """Dependency: instantiate LabelService with repositories and database session."""
     return LabelService(
@@ -297,6 +309,7 @@ def get_label_service(
         task_repo=task_repo,
         workspace_repo=workspace_repo,
         member_repo=member_repo,
+        cache_service=cache_service,
     )
 
 

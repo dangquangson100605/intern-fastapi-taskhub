@@ -48,3 +48,19 @@ class TokenType(enum.StrEnum):
 
     ACCESS = "access"
     REFRESH = "refresh"
+
+
+class TaskSortBy(enum.StrEnum):
+    """Sortable fields for task collections."""
+
+    CREATED_AT = "created_at"
+    DUE_DATE = "due_date"
+    PRIORITY = "priority"
+    TITLE = "title"
+
+
+class SortOrder(enum.StrEnum):
+    """Sort directions for collections."""
+
+    ASC = "asc"
+    DESC = "desc"

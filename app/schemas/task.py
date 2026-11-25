@@ -10,6 +10,7 @@ from app.core.constants import (
     TASK_TITLE_MAX_LENGTH,
     TASK_TITLE_MIN_LENGTH,
 )
+from app.core.datetime_utils import to_utc_naive
 from app.core.messages import ERROR_DUE_DATE_IN_PAST
 from app.models.enums import TaskPriority, TaskStatus
 from app.schemas.base import BaseSchema, validate_non_null
@@ -22,7 +23,7 @@ def validate_future_utc_datetime(value: datetime | None) -> datetime | None:
         val_utc = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
         if val_utc < now_utc:
             raise ValueError(ERROR_DUE_DATE_IN_PAST)
-        return val_utc.astimezone(UTC).replace(tzinfo=None)
+        return to_utc_naive(val_utc)
     return None
 
 

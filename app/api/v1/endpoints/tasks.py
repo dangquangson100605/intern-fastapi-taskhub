@@ -1,12 +1,14 @@
 """Task API endpoints for task creation, listing, status transitions, and deletion."""
 
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Query, status
 
+from app.core.constants import MAX_SEARCH_KEYWORD_LENGTH
 from app.core.dependencies import CurrentUser, PaginationDep, TaskServiceDep
 from app.core.messages import SUCCESS_TASK_DELETED
-from app.models.enums import TaskPriority, TaskStatus
+from app.models.enums import SortOrder, TaskPriority, TaskSortBy, TaskStatus
 from app.schemas.common import MessageResponse, PaginatedResponse
 from app.schemas.task import TaskCreate, TaskResponse, TaskStatusUpdate, TaskUpdate
 
@@ -47,7 +49,7 @@ async def create_task(
     response_model=PaginatedResponse[TaskResponse],
     status_code=status.HTTP_200_OK,
     summary="List project tasks",
-    description="Retrieve paginated tasks for a project with optional status, priority, and assignee filters.",
+    description="Retrieve paginated tasks for a project with optional search, filtering, and sorting.",
     responses={
         401: {"description": "Not authenticated"},
         404: {"description": "Project not found"},
@@ -58,6 +60,13 @@ async def list_project_tasks(
     pagination: PaginationDep,
     current_user: CurrentUser,
     service: TaskServiceDep,
+    search: Annotated[
+        str | None,
+        Query(
+            max_length=MAX_SEARCH_KEYWORD_LENGTH,
+            description="Search keyword in task title or description",
+        ),
+    ] = None,
     statuses: Annotated[
         list[TaskStatus] | None,
         Query(alias="status", description="Filter by one or more statuses"),
@@ -70,15 +79,41 @@ async def list_project_tasks(
         int | None,
         Query(ge=1, description="Filter by assignee user ID"),
     ] = None,
+    due_date_from: Annotated[
+        datetime | None,
+        Query(description="Filter tasks with due date on or after this timestamp"),
+    ] = None,
+    due_date_to: Annotated[
+        datetime | None,
+        Query(description="Filter tasks with due date on or before this timestamp"),
+    ] = None,
+    label_id: Annotated[
+        int | None,
+        Query(ge=1, description="Filter tasks attached to label ID"),
+    ] = None,
+    sort_by: Annotated[
+        TaskSortBy,
+        Query(description="Field to sort tasks by"),
+    ] = TaskSortBy.CREATED_AT,
+    sort_order: Annotated[
+        SortOrder,
+        Query(description="Sort direction (asc or desc)"),
+    ] = SortOrder.DESC,
 ) -> PaginatedResponse[TaskResponse]:
-    """List tasks in project with filters."""
+    """List tasks in project with search, filters, sorting, and pagination."""
     return await service.list_tasks(
         project_id=project_id,
         current_user=current_user,
         pagination=pagination,
+        search=search,
         statuses=statuses,
         priorities=priorities,
         assignee_id=assignee_id,
+        due_date_from=due_date_from,
+        due_date_to=due_date_to,
+        label_id=label_id,
+        sort_by=sort_by,
+        sort_order=sort_order,
     )
 
 

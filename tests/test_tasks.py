@@ -7,11 +7,14 @@ from typing import Any, cast
 
 import httpx
 import pytest
+from redis.asyncio import Redis
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.core.cache import CacheService
 from app.core.config import get_settings
 from app.core.dependencies import (
+    get_cache_service,
     get_current_user,
     get_db,
     get_project_repository,
@@ -31,7 +34,15 @@ from app.core.messages import (
     ERROR_PROJECT_ARCHIVED,
 )
 from app.main import app
-from app.models.enums import ProjectStatus, TaskPriority, TaskStatus, UserRole, WorkspaceRole
+from app.models.enums import (
+    ProjectStatus,
+    SortOrder,
+    TaskPriority,
+    TaskSortBy,
+    TaskStatus,
+    UserRole,
+    WorkspaceRole,
+)
 from app.models.project import Project
 from app.models.task import Task
 from app.models.workspace import Workspace
@@ -43,6 +54,7 @@ from app.services.project import ProjectService
 from app.services.task import TaskService
 from tests.conftest import (
     FakeAsyncSession,
+    FakeRedis,
     InMemoryUserRepository,
     InMemoryWorkspaceMemberRepository,
     InMemoryWorkspaceRepository,
@@ -187,20 +199,75 @@ class InMemoryTaskRepository(TaskRepository):
         self,
         project_id: int,
         pagination: PaginationParams,
+        search: str | None = None,
         statuses: Sequence[TaskStatus] | None = None,
         priorities: Sequence[TaskPriority] | None = None,
         assignee_id: int | None = None,
+        due_date_from: datetime | None = None,
+        due_date_to: datetime | None = None,
+        label_id: int | None = None,
+        sort_by: TaskSortBy = TaskSortBy.CREATED_AT,
+        sort_order: SortOrder = SortOrder.DESC,
     ) -> PaginationResult[Task]:
         matched = [t for t in self._tasks.values() if t.project_id == project_id]
+        if search:
+            kw = search.lower()
+            matched = [
+                t for t in matched
+                if (t.title and kw in t.title.lower()) or (t.description and kw in t.description.lower())
+            ]
         if statuses:
             matched = [t for t in matched if t.status in statuses]
         if priorities:
             matched = [t for t in matched if t.priority in priorities]
         if assignee_id is not None:
             matched = [t for t in matched if t.assignee_id == assignee_id]
+        if due_date_from is not None:
+            matched = [t for t in matched if t.due_date is not None and t.due_date >= due_date_from]
+        if due_date_to is not None:
+            matched = [t for t in matched if t.due_date is not None and t.due_date <= due_date_to]
+
+        if label_id is not None:
+            matched = [
+                t
+                for t in matched
+                if any(getattr(lbl, "id", None) == label_id for lbl in getattr(t, "labels", []))
+            ]
 
         total = len(matched)
-        matched.sort(key=lambda t: t.id, reverse=True)
+        if sort_by == TaskSortBy.PRIORITY:
+            prio_order = {
+                TaskPriority.LOW: 1,
+                TaskPriority.MEDIUM: 2,
+                TaskPriority.HIGH: 3,
+                TaskPriority.URGENT: 4,
+            }
+            matched.sort(
+                key=lambda t: (prio_order.get(t.priority, 0), t.id),
+                reverse=sort_order == SortOrder.DESC,
+            )
+        elif sort_by == TaskSortBy.DUE_DATE:
+            matched.sort(
+                key=lambda t: (
+                    t.due_date is None,
+                    (
+                        t.due_date
+                        if sort_order == SortOrder.ASC
+                        else -(t.due_date.timestamp() if t.due_date else 0)
+                    ),
+                    t.id if sort_order == SortOrder.ASC else -t.id,
+                ),
+            )
+        elif sort_by == TaskSortBy.TITLE:
+            matched.sort(
+                key=lambda t: (t.title.lower(), t.id),
+                reverse=sort_order == SortOrder.DESC,
+            )
+        else:
+            matched.sort(
+                key=lambda t: (t.created_at, t.id),
+                reverse=sort_order == SortOrder.DESC,
+            )
         offset = pagination.offset
         items = [self._attach_relations(t) for t in matched[offset : offset + pagination.limit]]
         return PaginationResult(
@@ -223,6 +290,8 @@ class TaskTestContext:
 
     def __init__(self) -> None:
         self.session = cast(AsyncSession, FakeAsyncSession())
+        self.fake_redis = FakeRedis()
+        self.cache_service = CacheService(cast(Redis, self.fake_redis))
         self.user_repo = InMemoryUserRepository(self.session)
         self.member_repo = InMemoryWorkspaceMemberRepository(self.session, self.user_repo)
         self.workspace_repo = InMemoryWorkspaceRepository(self.session, self.member_repo)
@@ -244,6 +313,7 @@ class TaskTestContext:
             workspace_repo=self.workspace_repo,
             member_repo=self.member_repo,
             user_repo=self.user_repo,
+            cache_service=self.cache_service,
         )
 
         self.owner = self.user_repo.add_test_user(1, "owner@example.com")
@@ -258,6 +328,7 @@ def task_ctx() -> Generator[TaskTestContext, None, None]:
     """Wire in-memory test repositories into dependency overrides."""
     ctx = TaskTestContext()
     app.dependency_overrides[get_db] = lambda: ctx.session
+    app.dependency_overrides[get_cache_service] = lambda: ctx.cache_service
     app.dependency_overrides[get_user_repository] = lambda: ctx.user_repo
     app.dependency_overrides[get_workspace_repository] = lambda: ctx.workspace_repo
     app.dependency_overrides[get_workspace_member_repository] = lambda: ctx.member_repo
