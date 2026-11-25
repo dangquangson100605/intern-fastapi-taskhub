@@ -26,8 +26,51 @@ from app.core.messages import (
     ERROR_RESOURCE_ALREADY_EXISTS,
 )
 from app.core.redis import close_redis, ping_redis
+from app.schemas.common import ErrorResponse
 
 settings = get_settings()
+
+openapi_tags = [
+    {
+        "name": "Auth",
+        "description": "User registration, authentication, JWT tokens, and token revoking.",
+    },
+    {
+        "name": "Users",
+        "description": "User profile retrieval, updates, and administrative user controls.",
+    },
+    {
+        "name": "Workspaces",
+        "description": "Workspace management and multi-tenant membership role administration.",
+    },
+    {
+        "name": "Projects",
+        "description": "Project creation, status transitions, and workspace scoping.",
+    },
+    {
+        "name": "Tasks",
+        "description": "Task lifecycle, assignment, status transitions, search/filtering, and background notifications.",
+    },
+    {
+        "name": "Labels",
+        "description": "Project label definitions and task-label associations.",
+    },
+    {
+        "name": "Comments",
+        "description": "Discussion comments on tasks with author tracking.",
+    },
+]
+
+app_description = (
+    "**TaskHub** — A production-ready Task Management API.\n\n"
+    "### Key Architecture & Features:\n"
+    "- **Multi-tenant RBAC**: Admin, Workspace Owner, Editor, and Viewer permission levels.\n"
+    "- **JWT Authentication**: Access and refresh tokens with Redis blacklist token revoking.\n"
+    "- **Advanced Querying**: Search, multi-field filtering, sorting, and pagination.\n"
+    "- **Performance & Caching**: Project-versioned Redis caching with automatic invalidation.\n"
+    "- **Background Tasks**: Non-blocking notifications for task assignments and status transitions.\n"
+    "- **Standardized Error Responses**: Uniform JSON error envelopes across all endpoints.\n"
+)
 
 
 @asynccontextmanager
@@ -46,13 +89,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
-    description=(
-        "**TaskHub** — A comprehensive Task Management API.\n\n"
-        "Manage workspaces, projects, tasks, labels, and comments "
-        "with role-based access control."
-    ),
+    description=app_description,
     docs_url="/docs",
     redoc_url="/redoc",
+    contact={
+        "name": "TaskHub API Support",
+        "email": "support@taskhub.io",
+    },
+    license_info={
+        "name": "MIT",
+        "identifier": "MIT",
+    },
+    openapi_tags=openapi_tags,
+    responses={
+        400: {"model": ErrorResponse, "description": "Bad Request"},
+        401: {"model": ErrorResponse, "description": "Unauthorized"},
+        403: {"model": ErrorResponse, "description": "Forbidden"},
+        404: {"model": ErrorResponse, "description": "Not Found"},
+        409: {"model": ErrorResponse, "description": "Conflict"},
+        422: {"model": ErrorResponse, "description": "Unprocessable Entity"},
+        500: {"model": ErrorResponse, "description": "Internal Server Error"},
+    },
     lifespan=lifespan,
 )
 

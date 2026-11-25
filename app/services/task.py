@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
+from fastapi import BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import CacheService
@@ -47,6 +48,7 @@ from app.repositories.workspace import WorkspaceRepository
 from app.repositories.workspace_member import WorkspaceMemberRepository
 from app.schemas.common import PaginatedResponse, PaginationParams
 from app.schemas.task import TaskCreate, TaskResponse, TaskStatusUpdate, TaskUpdate
+from app.services.notification import NotificationService
 
 
 class TaskService:
@@ -61,6 +63,7 @@ class TaskService:
         member_repo: WorkspaceMemberRepository,
         user_repo: UserRepository,
         cache_service: CacheService,
+        notification_service: NotificationService | None = None,
     ) -> None:
         self.session = session
         self.task_repo = task_repo
@@ -69,6 +72,7 @@ class TaskService:
         self.member_repo = member_repo
         self.user_repo = user_repo
         self.cache_service = cache_service
+        self.notification_service = notification_service or NotificationService()
 
     async def _validate_assignee_in_workspace(
         self,
@@ -145,6 +149,7 @@ class TaskService:
         project_id: int,
         current_user: User,
         data: TaskCreate,
+        background_tasks: BackgroundTasks | None = None,
     ) -> TaskResponse:
         """Create a new task in a project verifying write role and invalidating project cache."""
         project = await self._get_project_for_create_task(
@@ -171,6 +176,21 @@ class TaskService:
         await self.session.refresh(task)
         await self.session.refresh(task, attribute_names=["creator", "assignee"])
         await self.cache_service.bump_project_tasks_version(project_id)
+
+        assignee_user = task.assignee
+        if assignee_user is None and task.assignee_id is not None:
+            assignee_user = await self.user_repo.get_by_id(task.assignee_id)
+
+        if background_tasks is not None and assignee_user is not None:
+            background_tasks.add_task(
+                self.notification_service.send_task_assignment_notification,
+                assignee_email=assignee_user.email,
+                assignee_name=assignee_user.full_name,
+                task_title=task.title,
+                project_name=project.name,
+                assigner_name=current_user.full_name,
+            )
+
         return TaskResponse.model_validate(task)
 
     def _serialize_query_parts(
@@ -348,6 +368,7 @@ class TaskService:
         task_id: int,
         current_user: User,
         data: TaskUpdate,
+        background_tasks: BackgroundTasks | None = None,
     ) -> TaskResponse:
         """Update task attributes and invalidate project task caches."""
         task, project, _ = await self._get_task_for_write(
@@ -356,6 +377,7 @@ class TaskService:
             require_active_project=True,
         )
 
+        old_assignee_id = task.assignee_id
         update_data = data.model_dump(exclude_unset=True)
 
         if "assignee_id" in update_data:
@@ -376,6 +398,25 @@ class TaskService:
         await self.session.refresh(task)
         await self.session.refresh(task, attribute_names=["creator", "assignee"])
         await self.cache_service.bump_project_tasks_version(project.id)
+
+        assignee_user = task.assignee
+        if assignee_user is None and task.assignee_id is not None:
+            assignee_user = await self.user_repo.get_by_id(task.assignee_id)
+
+        if (
+            background_tasks is not None
+            and assignee_user is not None
+            and task.assignee_id != old_assignee_id
+        ):
+            background_tasks.add_task(
+                self.notification_service.send_task_assignment_notification,
+                assignee_email=assignee_user.email,
+                assignee_name=assignee_user.full_name,
+                task_title=task.title,
+                project_name=project.name,
+                assigner_name=current_user.full_name,
+            )
+
         return TaskResponse.model_validate(task)
 
     async def update_task_status(
@@ -383,19 +424,46 @@ class TaskService:
         task_id: int,
         current_user: User,
         data: TaskStatusUpdate,
+        background_tasks: BackgroundTasks | None = None,
     ) -> TaskResponse:
         """Fast status transition and cache invalidation."""
-        task, _, _ = await self._get_task_for_write(
+        task, project, _ = await self._get_task_for_write(
             task_id=task_id,
             current_user=current_user,
             require_active_project=True,
         )
 
+        old_status = task.status
         task.status = data.status
         await self.session.commit()
         await self.session.refresh(task)
         await self.session.refresh(task, attribute_names=["creator", "assignee"])
         await self.cache_service.bump_project_tasks_version(task.project_id)
+
+        if background_tasks is not None and old_status != data.status:
+            recipients: list[str] = []
+            creator_user = task.creator or await self.user_repo.get_by_id(task.created_by)
+            if creator_user and creator_user.email:
+                recipients.append(creator_user.email)
+
+            assignee_user = task.assignee
+            if assignee_user is None and task.assignee_id is not None:
+                assignee_user = await self.user_repo.get_by_id(task.assignee_id)
+
+            if assignee_user and assignee_user.email and assignee_user.email not in recipients:
+                recipients.append(assignee_user.email)
+
+            if recipients:
+                background_tasks.add_task(
+                    self.notification_service.send_task_status_changed_notification,
+                    recipient_emails=recipients,
+                    task_title=task.title,
+                    project_name=project.name,
+                    old_status=old_status,
+                    new_status=data.status,
+                    updater_name=current_user.full_name,
+                )
+
         return TaskResponse.model_validate(task)
 
     async def delete_task(

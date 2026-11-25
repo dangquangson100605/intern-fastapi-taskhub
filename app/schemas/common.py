@@ -40,3 +40,11 @@ class MessageResponse(BaseModel):
 
     message: str
     detail: str | None = None
+
+
+class ErrorResponse(BaseModel):
+    """Standardized error response payload matching AppException format."""
+
+    error: str = Field(description="Machine-readable error code")
+    message: str = Field(description="Human-readable error description")
+    path: str = Field(description="Request URL path where error occurred")

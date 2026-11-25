@@ -3,13 +3,13 @@
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, BackgroundTasks, Query, status
 
 from app.core.constants import MAX_SEARCH_KEYWORD_LENGTH
 from app.core.dependencies import CurrentUser, PaginationDep, TaskServiceDep
 from app.core.messages import SUCCESS_TASK_DELETED
 from app.models.enums import SortOrder, TaskPriority, TaskSortBy, TaskStatus
-from app.schemas.common import MessageResponse, PaginatedResponse
+from app.schemas.common import ErrorResponse, MessageResponse, PaginatedResponse
 from app.schemas.task import TaskCreate, TaskResponse, TaskStatusUpdate, TaskUpdate
 
 router = APIRouter(tags=["Tasks"])
@@ -22,12 +22,12 @@ router = APIRouter(tags=["Tasks"])
     summary="Create a task",
     description="Create a task inside a project. Default status is TODO. Assignee must be a workspace member.",
     responses={
-        400: {"description": "Bad request (assignee not in workspace)"},
-        401: {"description": "Not authenticated"},
-        403: {"description": "Permission denied"},
-        404: {"description": "Project not found"},
-        409: {"description": "Project is archived"},
-        422: {"description": "Validation error"},
+        400: {"model": ErrorResponse, "description": "Bad request (assignee not in workspace)"},
+        401: {"model": ErrorResponse, "description": "Not authenticated"},
+        403: {"model": ErrorResponse, "description": "Permission denied"},
+        404: {"model": ErrorResponse, "description": "Project not found"},
+        409: {"model": ErrorResponse, "description": "Project is archived"},
+        422: {"model": ErrorResponse, "description": "Validation error"},
     },
 )
 async def create_task(
@@ -35,12 +35,14 @@ async def create_task(
     data: TaskCreate,
     current_user: CurrentUser,
     service: TaskServiceDep,
+    background_tasks: BackgroundTasks,
 ) -> TaskResponse:
-    """Create task in project."""
+    """Create task in project and schedule notification in background."""
     return await service.create_task(
         project_id=project_id,
         current_user=current_user,
         data=data,
+        background_tasks=background_tasks,
     )
 
 
@@ -51,8 +53,9 @@ async def create_task(
     summary="List project tasks",
     description="Retrieve paginated tasks for a project with optional search, filtering, and sorting.",
     responses={
-        401: {"description": "Not authenticated"},
-        404: {"description": "Project not found"},
+        400: {"model": ErrorResponse, "description": "Bad request (invalid filter parameters)"},
+        401: {"model": ErrorResponse, "description": "Not authenticated"},
+        404: {"model": ErrorResponse, "description": "Project not found"},
     },
 )
 async def list_project_tasks(
@@ -124,8 +127,8 @@ async def list_project_tasks(
     summary="Get task details",
     description="Fetch single task details ensuring caller has membership across task -> project -> workspace.",
     responses={
-        401: {"description": "Not authenticated"},
-        404: {"description": "Task not found"},
+        401: {"model": ErrorResponse, "description": "Not authenticated"},
+        404: {"model": ErrorResponse, "description": "Task not found"},
     },
 )
 async def get_task(
@@ -144,12 +147,12 @@ async def get_task(
     summary="Update task",
     description="Update task fields. Blocked if parent project is archived. Assignee must be in workspace.",
     responses={
-        400: {"description": "Bad request (assignee not in workspace)"},
-        401: {"description": "Not authenticated"},
-        403: {"description": "Permission denied"},
-        404: {"description": "Task not found"},
-        409: {"description": "Project is archived"},
-        422: {"description": "Validation error"},
+        400: {"model": ErrorResponse, "description": "Bad request (assignee not in workspace)"},
+        401: {"model": ErrorResponse, "description": "Not authenticated"},
+        403: {"model": ErrorResponse, "description": "Permission denied"},
+        404: {"model": ErrorResponse, "description": "Task not found"},
+        409: {"model": ErrorResponse, "description": "Project is archived"},
+        422: {"model": ErrorResponse, "description": "Validation error"},
     },
 )
 async def update_task(
@@ -157,12 +160,14 @@ async def update_task(
     data: TaskUpdate,
     current_user: CurrentUser,
     service: TaskServiceDep,
+    background_tasks: BackgroundTasks,
 ) -> TaskResponse:
-    """Update task details."""
+    """Update task details and schedule assignment notification if assignee changed."""
     return await service.update_task(
         task_id=task_id,
         current_user=current_user,
         data=data,
+        background_tasks=background_tasks,
     )
 
 
@@ -173,11 +178,11 @@ async def update_task(
     summary="Update task status",
     description="Fast status transition. Blocked if parent project is archived.",
     responses={
-        401: {"description": "Not authenticated"},
-        403: {"description": "Permission denied"},
-        404: {"description": "Task not found"},
-        409: {"description": "Project is archived"},
-        422: {"description": "Validation error"},
+        401: {"model": ErrorResponse, "description": "Not authenticated"},
+        403: {"model": ErrorResponse, "description": "Permission denied"},
+        404: {"model": ErrorResponse, "description": "Task not found"},
+        409: {"model": ErrorResponse, "description": "Project is archived"},
+        422: {"model": ErrorResponse, "description": "Validation error"},
     },
 )
 async def update_task_status(
@@ -185,12 +190,14 @@ async def update_task_status(
     data: TaskStatusUpdate,
     current_user: CurrentUser,
     service: TaskServiceDep,
+    background_tasks: BackgroundTasks,
 ) -> TaskResponse:
-    """Update task status."""
+    """Update task status and schedule notification in background."""
     return await service.update_task_status(
         task_id=task_id,
         current_user=current_user,
         data=data,
+        background_tasks=background_tasks,
     )
 
 
@@ -201,10 +208,10 @@ async def update_task_status(
     summary="Delete task",
     description="Delete task. Requires write role in parent workspace and active project.",
     responses={
-        401: {"description": "Not authenticated"},
-        403: {"description": "Permission denied"},
-        404: {"description": "Task not found"},
-        409: {"description": "Project is archived"},
+        401: {"model": ErrorResponse, "description": "Not authenticated"},
+        403: {"model": ErrorResponse, "description": "Permission denied"},
+        404: {"model": ErrorResponse, "description": "Task not found"},
+        409: {"model": ErrorResponse, "description": "Project is archived"},
     },
 )
 async def delete_task(
