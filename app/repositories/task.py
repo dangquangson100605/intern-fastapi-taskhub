@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import Select, and_, case, func, or_, select
 from sqlalchemy.orm import selectinload
 
 from app.models.enums import SortOrder, TaskPriority, TaskSortBy, TaskStatus, WorkspaceRole
@@ -51,7 +51,7 @@ class TaskRepository(BaseRepository[Task]):
         effective_role = WorkspaceRole.OWNER if owner_id == user_id else member_role
         return task, project, effective_role
 
-    async def list_by_project(
+    def build_list_queries(
         self,
         project_id: int,
         pagination: PaginationParams,
@@ -64,21 +64,15 @@ class TaskRepository(BaseRepository[Task]):
         label_id: int | None = None,
         sort_by: TaskSortBy = TaskSortBy.CREATED_AT,
         sort_order: SortOrder = SortOrder.DESC,
-    ) -> PaginationResult[Task]:
-        """Fetch filtered, sorted, and paginated tasks for a project avoiding N+1 via selectinload."""
+    ) -> tuple[Select[int], Select[Task]]:
+        """Construct the count and data Select statements for project task listing."""
         conditions: list[Any] = [Task.project_id == project_id]
 
         if search:
-            escaped = (
-                search.replace("\\", "\\\\")
-                .replace("%", "\\%")
-                .replace("_", "\\_")
-            )
-            pattern = f"%{escaped}%"
             conditions.append(
                 or_(
-                    Task.title.ilike(pattern),
-                    Task.description.ilike(pattern),
+                    Task.title.icontains(search, autoescape=True),
+                    Task.description.icontains(search, autoescape=True),
                 )
             )
 
@@ -102,11 +96,15 @@ class TaskRepository(BaseRepository[Task]):
             conditions.append(Task.id.in_(label_subquery))
 
         count_query = select(func.count(Task.id)).where(*conditions)
-        total_result = await self.session.execute(count_query)
-        total = total_result.scalar() or 0
 
-        sort_expr: Any
-        if sort_by == TaskSortBy.PRIORITY:
+        order_clause: list[Any] = []
+        if sort_by == TaskSortBy.DUE_DATE:
+            order_clause.append(Task.due_date.is_(None).asc())
+            if sort_order == SortOrder.ASC:
+                order_clause.extend([Task.due_date.asc(), Task.id.asc()])
+            else:
+                order_clause.extend([Task.due_date.desc(), Task.id.desc()])
+        elif sort_by == TaskSortBy.PRIORITY:
             priority_rank = case(
                 (Task.priority == TaskPriority.LOW, 1),
                 (Task.priority == TaskPriority.MEDIUM, 2),
@@ -114,18 +112,20 @@ class TaskRepository(BaseRepository[Task]):
                 (Task.priority == TaskPriority.URGENT, 4),
                 else_=0,
             )
-            sort_expr = priority_rank
-        elif sort_by == TaskSortBy.DUE_DATE:
-            sort_expr = Task.due_date
+            if sort_order == SortOrder.ASC:
+                order_clause = [priority_rank.asc(), Task.id.asc()]
+            else:
+                order_clause = [priority_rank.desc(), Task.id.desc()]
         elif sort_by == TaskSortBy.TITLE:
-            sort_expr = Task.title
+            if sort_order == SortOrder.ASC:
+                order_clause = [Task.title.asc(), Task.id.asc()]
+            else:
+                order_clause = [Task.title.desc(), Task.id.desc()]
         else:
-            sort_expr = Task.created_at
-
-        if sort_order == SortOrder.ASC:
-            order_clause = [sort_expr.asc(), Task.id.asc()]
-        else:
-            order_clause = [sort_expr.desc(), Task.id.desc()]
+            if sort_order == SortOrder.ASC:
+                order_clause = [Task.created_at.asc(), Task.id.asc()]
+            else:
+                order_clause = [Task.created_at.desc(), Task.id.desc()]
 
         data_query = (
             select(Task)
@@ -135,6 +135,39 @@ class TaskRepository(BaseRepository[Task]):
             .offset(pagination.offset)
             .limit(pagination.limit)
         )
+        return count_query, data_query
+
+    async def list_by_project(
+        self,
+        project_id: int,
+        pagination: PaginationParams,
+        search: str | None = None,
+        statuses: Sequence[TaskStatus] | None = None,
+        priorities: Sequence[TaskPriority] | None = None,
+        assignee_id: int | None = None,
+        due_date_from: datetime | None = None,
+        due_date_to: datetime | None = None,
+        label_id: int | None = None,
+        sort_by: TaskSortBy = TaskSortBy.CREATED_AT,
+        sort_order: SortOrder = SortOrder.DESC,
+    ) -> PaginationResult[Task]:
+        """Fetch filtered, sorted, and paginated tasks for a project avoiding N+1 via selectinload."""
+        count_query, data_query = self.build_list_queries(
+            project_id=project_id,
+            pagination=pagination,
+            search=search,
+            statuses=statuses,
+            priorities=priorities,
+            assignee_id=assignee_id,
+            due_date_from=due_date_from,
+            due_date_to=due_date_to,
+            label_id=label_id,
+            sort_by=sort_by,
+            sort_order=sort_order,
+        )
+        total_result = await self.session.execute(count_query)
+        total = int(total_result.scalar() or 0)
+
         result = await self.session.execute(data_query)
         items = list(result.scalars().all())
 

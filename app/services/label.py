@@ -47,7 +47,7 @@ class LabelService:
         task_repo: TaskRepository,
         workspace_repo: WorkspaceRepository,
         member_repo: WorkspaceMemberRepository,
-        cache_service: CacheService | None = None,
+        cache_service: CacheService,
     ) -> None:
         self.session = session
         self.label_repo = label_repo
@@ -234,6 +234,7 @@ class LabelService:
 
         await self.label_repo.delete(label.id)
         await self.session.commit()
+        await self.cache_service.bump_project_tasks_version(label.project_id)
         return MessageResponse(message=SUCCESS_LABEL_DELETED)
 
     async def assign_label_to_task(
@@ -256,9 +257,7 @@ class LabelService:
             await self.session.rollback()
             raise ConflictException(ERROR_LABEL_ALREADY_ASSIGNED) from exc
 
-        if self.cache_service is not None:
-            await self.cache_service.invalidate_project_tasks(task.project_id)
-
+        await self.cache_service.bump_project_tasks_version(task.project_id)
         return MessageResponse(message=SUCCESS_LABEL_ASSIGNED)
 
     async def remove_label_from_task(
@@ -275,10 +274,7 @@ class LabelService:
             raise NotFoundException(message=ERROR_LABEL_NOT_ASSIGNED)
 
         await self.session.commit()
-
-        if self.cache_service is not None:
-            await self.cache_service.invalidate_project_tasks(task.project_id)
-
+        await self.cache_service.bump_project_tasks_version(task.project_id)
         return MessageResponse(message=SUCCESS_LABEL_REMOVED)
 
     async def list_task_labels(

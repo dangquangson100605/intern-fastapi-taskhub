@@ -1,5 +1,6 @@
 """Pytest configuration and shared fixtures."""
 
+import fnmatch
 import math
 from collections.abc import AsyncGenerator, Sequence
 from datetime import UTC, datetime
@@ -7,6 +8,7 @@ from typing import Any
 
 import httpx
 import pytest
+from redis.exceptions import RedisError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -50,6 +52,60 @@ class FakeAsyncSession:
 
     async def refresh(self, instance: Any, attribute_names: Sequence[str] | None = None) -> None:
         _ = (instance, attribute_names)
+
+
+class FakeRedis:
+    """In-memory Redis fake supporting get, setex, incr, delete, scan_iter, and unlink."""
+
+    def __init__(self) -> None:
+        self.store: dict[str, str] = {}
+        self.simulate_error: bool = False
+
+    async def get(self, key: str) -> str | None:
+        if self.simulate_error:
+            raise RedisError("Simulated Redis get failure")
+        return self.store.get(key)
+
+    async def setex(self, key: str, ttl: int, value: str) -> bool:
+        _ = ttl
+        if self.simulate_error:
+            raise RedisError("Simulated Redis set failure")
+        self.store[key] = value
+        return True
+
+    async def incr(self, key: str) -> int:
+        if self.simulate_error:
+            raise RedisError("Simulated Redis incr failure")
+        current = int(self.store.get(key, "1"))
+        new_val = current + 1
+        self.store[key] = str(new_val)
+        return new_val
+
+    async def delete(self, key: str) -> int:
+        if self.simulate_error:
+            raise RedisError("Simulated Redis delete failure")
+        if key in self.store:
+            del self.store[key]
+            return 1
+        return 0
+
+    async def scan_iter(self, match: str = "*", count: int = 100) -> AsyncGenerator[str, None]:
+        _ = count
+        if self.simulate_error:
+            raise RedisError("Simulated Redis scan failure")
+        for k in list(self.store.keys()):
+            if fnmatch.fnmatch(k, match):
+                yield k
+
+    async def unlink(self, *keys: str) -> int:
+        if self.simulate_error:
+            raise RedisError("Simulated Redis unlink failure")
+        deleted = 0
+        for k in keys:
+            if k in self.store:
+                del self.store[k]
+                deleted += 1
+        return deleted
 
 
 class InMemoryUserRepository(UserRepository):

@@ -5,6 +5,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query, status
 
+from app.core.constants import MAX_SEARCH_KEYWORD_LENGTH
 from app.core.dependencies import CurrentUser, PaginationDep, TaskServiceDep
 from app.core.messages import SUCCESS_TASK_DELETED
 from app.models.enums import SortOrder, TaskPriority, TaskSortBy, TaskStatus
@@ -61,7 +62,10 @@ async def list_project_tasks(
     service: TaskServiceDep,
     search: Annotated[
         str | None,
-        Query(max_length=255, description="Search keyword in task title or description"),
+        Query(
+            max_length=MAX_SEARCH_KEYWORD_LENGTH,
+            description="Search keyword in task title or description",
+        ),
     ] = None,
     statuses: Annotated[
         list[TaskStatus] | None,

@@ -1,4 +1,4 @@
-"""Redis caching service for query result caching and proactive cache invalidation."""
+"""Redis caching service for query result caching, versioning, and proactive cache invalidation."""
 
 import hashlib
 import json
@@ -8,26 +8,53 @@ from loguru import logger
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
-DEFAULT_CACHE_TTL: int = 300
+from app.core.config import get_settings
+from app.core.constants import REDIS_PROJECT_TASKS_CACHE_PREFIX
 
 
 class CacheService:
-    """Service providing JSON serialization, key generation, and non-blocking invalidation."""
+    """Service providing JSON serialization, key versioning, and race-free cache invalidation."""
 
     def __init__(self, client: Redis) -> None:
         self.client = client
 
+    def _project_tasks_version_key(self, project_id: int) -> str:
+        """Construct the Redis key tracking the current version of a project's tasks."""
+        return f"{REDIS_PROJECT_TASKS_CACHE_PREFIX}:{project_id}:tasks:ver"
+
+    async def get_project_tasks_version(self, project_id: int) -> int:
+        """Retrieve current tasks cache version for a project, defaulting to 1."""
+        try:
+            raw_version = await self.client.get(self._project_tasks_version_key(project_id))
+            if raw_version is not None:
+                return int(raw_version)
+        except (RedisError, ValueError, TypeError) as exc:
+            logger.warning("Redis read failure for project {} tasks version: {}", project_id, exc)
+        return 1
+
+    async def bump_project_tasks_version(self, project_id: int) -> int:
+        """Increment project tasks version, atomically invalidating all previous query results."""
+        try:
+            return int(await self.client.incr(self._project_tasks_version_key(project_id)))
+        except RedisError as exc:
+            logger.warning("Redis version increment failure for project {}: {}", project_id, exc)
+            return 1
+
     def build_project_tasks_cache_key(
         self,
         project_id: int,
+        version: int,
         page: int,
         limit: int,
         query_parts: dict[str, Any],
     ) -> str:
-        """Construct a deterministic MD5-hashed cache key for a specific query combination."""
+        """Construct a deterministic MD5-hashed cache key incorporating project ID, version, and query parts."""
         serialized_query = json.dumps(query_parts, sort_keys=True, default=str)
         query_hash = hashlib.md5(serialized_query.encode()).hexdigest()
-        return f"cache:project:{project_id}:tasks:page_{page}_limit_{limit}:{query_hash}"
+        return (
+            f"{REDIS_PROJECT_TASKS_CACHE_PREFIX}:{project_id}:tasks:"
+            f"v_{version}:page_{page}_limit_{limit}:{query_hash}"
+        )
 
     async def get(self, key: str) -> dict[str, Any] | None:
         """Retrieve and deserialize a JSON cached dictionary from Redis."""
@@ -43,11 +70,12 @@ class CacheService:
             logger.warning("Redis cache read failure for key '{}': {}", key, exc)
             return None
 
-    async def set(self, key: str, value: Any, ttl: int = DEFAULT_CACHE_TTL) -> bool:
+    async def set(self, key: str, value: Any, ttl: int | None = None) -> bool:
         """Serialize a dictionary or JSON-compatible value to Redis with a TTL."""
         try:
+            effective_ttl = ttl if ttl is not None else get_settings().TASK_CACHE_TTL_SECONDS
             payload = json.dumps(value, default=str)
-            await self.client.setex(key, ttl, payload)
+            await self.client.setex(key, effective_ttl, payload)
             return True
         except (RedisError, TypeError) as exc:
             logger.warning("Redis cache write failure for key '{}': {}", key, exc)
@@ -75,7 +103,3 @@ class CacheService:
         except RedisError as exc:
             logger.warning("Redis cache invalidation failure for pattern '{}': {}", pattern, exc)
         return deleted_count
-
-    async def invalidate_project_tasks(self, project_id: int) -> int:
-        """Invalidate all cached task queries for a specific project."""
-        return await self.invalidate_pattern(f"cache:project:{project_id}:tasks:*")

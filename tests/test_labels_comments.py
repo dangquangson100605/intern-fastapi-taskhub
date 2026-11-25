@@ -7,13 +7,16 @@ from typing import Any, cast
 
 import httpx
 import pytest
+from redis.asyncio import Redis
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.core.cache import CacheService
 from app.core.config import get_settings
 from app.core.constants import DEFAULT_LABEL_COLOR
 from app.core.dependencies import (
+    get_cache_service,
     get_comment_repository,
     get_comment_service,
     get_current_user,
@@ -52,6 +55,7 @@ from app.services.comment import CommentService
 from app.services.label import LabelService
 from tests.conftest import (
     FakeAsyncSession,
+    FakeRedis,
     InMemoryUserRepository,
     InMemoryWorkspaceMemberRepository,
     InMemoryWorkspaceRepository,
@@ -398,6 +402,8 @@ class LabelCommentTestContext:
             self.session, self.task_repo, self.user_repo
         )
 
+        self.fake_redis = FakeRedis()
+        self.cache_service = CacheService(cast(Redis, self.fake_redis))
         self.label_service = LabelService(
             session=self.session,
             label_repo=self.label_repo,
@@ -405,6 +411,7 @@ class LabelCommentTestContext:
             task_repo=self.task_repo,
             workspace_repo=self.workspace_repo,
             member_repo=self.member_repo,
+            cache_service=self.cache_service,
         )
         self.comment_service = CommentService(
             session=self.session,
@@ -424,6 +431,7 @@ def lc_ctx() -> Generator[LabelCommentTestContext, None, None]:
     """Wire in-memory test repositories into dependency overrides."""
     ctx = LabelCommentTestContext()
     app.dependency_overrides[get_db] = lambda: ctx.session
+    app.dependency_overrides[get_cache_service] = lambda: ctx.cache_service
     app.dependency_overrides[get_user_repository] = lambda: ctx.user_repo
     app.dependency_overrides[get_workspace_repository] = lambda: ctx.workspace_repo
     app.dependency_overrides[get_workspace_member_repository] = lambda: ctx.member_repo

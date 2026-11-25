@@ -1,17 +1,20 @@
 """Task service orchestrating task management, RBAC, filtering, and cache invalidation."""
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import datetime
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import CacheService
+from app.core.config import get_settings
 from app.core.constants import (
     RESOURCE_PROJECT,
     RESOURCE_TASK,
     RESOURCE_USER,
     WORKSPACE_WRITE_ROLES,
 )
+from app.core.datetime_utils import to_utc_naive
 from app.core.exceptions import (
     BadRequestException,
     ConflictException,
@@ -21,6 +24,7 @@ from app.core.exceptions import (
 from app.core.messages import (
     ERROR_ASSIGNEE_NOT_IN_WORKSPACE,
     ERROR_INACTIVE_USER,
+    ERROR_INVALID_DATE_RANGE,
     ERROR_PERMISSION_DENIED,
     ERROR_PROJECT_ARCHIVED,
 )
@@ -56,7 +60,7 @@ class TaskService:
         workspace_repo: WorkspaceRepository,
         member_repo: WorkspaceMemberRepository,
         user_repo: UserRepository,
-        cache_service: CacheService | None = None,
+        cache_service: CacheService,
     ) -> None:
         self.session = session
         self.task_repo = task_repo
@@ -166,11 +170,75 @@ class TaskService:
         await self.session.commit()
         await self.session.refresh(task)
         await self.session.refresh(task, attribute_names=["creator", "assignee"])
-
-        if self.cache_service is not None:
-            await self.cache_service.invalidate_project_tasks(project_id)
-
+        await self.cache_service.bump_project_tasks_version(project_id)
         return TaskResponse.model_validate(task)
+
+    def _serialize_query_parts(
+        self,
+        search: str | None,
+        statuses: Sequence[TaskStatus] | None,
+        priorities: Sequence[TaskPriority] | None,
+        assignee_id: int | None,
+        due_date_from: datetime | None,
+        due_date_to: datetime | None,
+        label_id: int | None,
+        sort_by: TaskSortBy,
+        sort_order: SortOrder,
+    ) -> dict[str, Any]:
+        """Serialize query parameters for deterministic hashing."""
+        return {
+            "search": search or "",
+            "statuses": sorted([s.value for s in statuses]) if statuses else [],
+            "priorities": sorted([p.value for p in priorities]) if priorities else [],
+            "assignee_id": assignee_id,
+            "due_date_from": due_date_from.isoformat() if due_date_from else None,
+            "due_date_to": due_date_to.isoformat() if due_date_to else None,
+            "label_id": label_id,
+            "sort_by": sort_by.value,
+            "sort_order": sort_order.value,
+        }
+
+    async def _get_cached_tasks(
+        self,
+        project_id: int,
+        version: int,
+        pagination: PaginationParams,
+        query_parts: dict[str, Any],
+    ) -> PaginatedResponse[TaskResponse] | None:
+        """Fetch and deserialize cached tasks page if present."""
+        cache_key = self.cache_service.build_project_tasks_cache_key(
+            project_id=project_id,
+            version=version,
+            page=pagination.page,
+            limit=pagination.limit,
+            query_parts=query_parts,
+        )
+        cached_data = await self.cache_service.get(cache_key)
+        if cached_data is not None:
+            return PaginatedResponse[TaskResponse].model_validate(cached_data)
+        return None
+
+    async def _set_cached_tasks(
+        self,
+        project_id: int,
+        version: int,
+        pagination: PaginationParams,
+        query_parts: dict[str, Any],
+        response: PaginatedResponse[TaskResponse],
+    ) -> None:
+        """Write paginated tasks response to Redis cache."""
+        cache_key = self.cache_service.build_project_tasks_cache_key(
+            project_id=project_id,
+            version=version,
+            page=pagination.page,
+            limit=pagination.limit,
+            query_parts=query_parts,
+        )
+        await self.cache_service.set(
+            cache_key,
+            response.model_dump(mode="json"),
+            ttl=get_settings().TASK_CACHE_TTL_SECONDS,
+        )
 
     async def list_tasks(
         self,
@@ -187,7 +255,7 @@ class TaskService:
         sort_by: TaskSortBy = TaskSortBy.CREATED_AT,
         sort_order: SortOrder = SortOrder.DESC,
     ) -> PaginatedResponse[TaskResponse]:
-        """List tasks with dynamic filters, sorting, and transparent Redis caching."""
+        """List tasks with dynamic filters, sorting, and versioned Redis caching."""
         resolved = await self.project_repo.get_with_workspace_role(
             project_id=project_id,
             user_id=current_user.id,
@@ -199,49 +267,38 @@ class TaskService:
         if current_user.role != UserRole.ADMIN and role is None:
             raise NotFoundException(RESOURCE_PROJECT)
 
-        norm_due_from = None
-        if due_date_from is not None:
-            norm_due_from = (
-                due_date_from.astimezone(UTC).replace(tzinfo=None)
-                if due_date_from.tzinfo is not None
-                else due_date_from
-            )
+        norm_due_from = to_utc_naive(due_date_from)
+        norm_due_to = to_utc_naive(due_date_to)
+        if norm_due_from is not None and norm_due_to is not None and norm_due_from > norm_due_to:
+            raise BadRequestException(ERROR_INVALID_DATE_RANGE)
 
-        norm_due_to = None
-        if due_date_to is not None:
-            norm_due_to = (
-                due_date_to.astimezone(UTC).replace(tzinfo=None)
-                if due_date_to.tzinfo is not None
-                else due_date_to
-            )
+        clean_search = search.strip() if search and search.strip() else None
 
-        cache_key = None
-        if self.cache_service is not None:
-            query_parts = {
-                "search": search or "",
-                "statuses": sorted([s.value for s in statuses]) if statuses else [],
-                "priorities": sorted([p.value for p in priorities]) if priorities else [],
-                "assignee_id": assignee_id,
-                "due_date_from": norm_due_from.isoformat() if norm_due_from else None,
-                "due_date_to": norm_due_to.isoformat() if norm_due_to else None,
-                "label_id": label_id,
-                "sort_by": sort_by.value,
-                "sort_order": sort_order.value,
-            }
-            cache_key = self.cache_service.build_project_tasks_cache_key(
-                project_id=project_id,
-                page=pagination.page,
-                limit=pagination.limit,
-                query_parts=query_parts,
-            )
-            cached_data = await self.cache_service.get(cache_key)
-            if cached_data is not None:
-                return PaginatedResponse[TaskResponse].model_validate(cached_data)
+        version = await self.cache_service.get_project_tasks_version(project_id)
+        query_parts = self._serialize_query_parts(
+            search=clean_search,
+            statuses=statuses,
+            priorities=priorities,
+            assignee_id=assignee_id,
+            due_date_from=norm_due_from,
+            due_date_to=norm_due_to,
+            label_id=label_id,
+            sort_by=sort_by,
+            sort_order=sort_order,
+        )
+        cached_response = await self._get_cached_tasks(
+            project_id=project_id,
+            version=version,
+            pagination=pagination,
+            query_parts=query_parts,
+        )
+        if cached_response is not None:
+            return cached_response
 
         result = await self.task_repo.list_by_project(
             project_id=project_id,
             pagination=pagination,
-            search=search,
+            search=clean_search,
             statuses=statuses,
             priorities=priorities,
             assignee_id=assignee_id,
@@ -258,10 +315,13 @@ class TaskService:
             limit=result.limit,
             total_pages=result.total_pages,
         )
-
-        if self.cache_service is not None and cache_key is not None:
-            await self.cache_service.set(cache_key, response.model_dump(mode="json"))
-
+        await self._set_cached_tasks(
+            project_id=project_id,
+            version=version,
+            pagination=pagination,
+            query_parts=query_parts,
+            response=response,
+        )
         return response
 
     async def get_task(
@@ -315,10 +375,7 @@ class TaskService:
         await self.session.commit()
         await self.session.refresh(task)
         await self.session.refresh(task, attribute_names=["creator", "assignee"])
-
-        if self.cache_service is not None:
-            await self.cache_service.invalidate_project_tasks(project.id)
-
+        await self.cache_service.bump_project_tasks_version(project.id)
         return TaskResponse.model_validate(task)
 
     async def update_task_status(
@@ -338,10 +395,7 @@ class TaskService:
         await self.session.commit()
         await self.session.refresh(task)
         await self.session.refresh(task, attribute_names=["creator", "assignee"])
-
-        if self.cache_service is not None:
-            await self.cache_service.invalidate_project_tasks(task.project_id)
-
+        await self.cache_service.bump_project_tasks_version(task.project_id)
         return TaskResponse.model_validate(task)
 
     async def delete_task(
@@ -359,6 +413,4 @@ class TaskService:
 
         await self.task_repo.delete(task_id)
         await self.session.commit()
-
-        if self.cache_service is not None:
-            await self.cache_service.invalidate_project_tasks(project_id)
+        await self.cache_service.bump_project_tasks_version(project_id)

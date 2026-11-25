@@ -1,15 +1,13 @@
 """Comprehensive tests for Day 7: search, multi-criteria filtering, pagination, sorting, and Redis caching."""
 
-import fnmatch
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import httpx
 import pytest
 from redis.asyncio import Redis
-from redis.exceptions import RedisError
-from sqlalchemy import select
+from sqlalchemy.dialects import mysql
 
 from app.core.cache import CacheService
 from app.core.dependencies import (
@@ -26,6 +24,7 @@ from app.core.dependencies import (
     get_workspace_member_repository,
     get_workspace_repository,
 )
+from app.core.messages import ERROR_INVALID_DATE_RANGE
 from app.main import app
 from app.models.enums import (
     ProjectStatus,
@@ -49,56 +48,11 @@ from app.services.project import ProjectService
 from app.services.task import TaskService
 from tests.conftest import (
     FakeAsyncSession,
+    FakeRedis,
     InMemoryUserRepository,
     InMemoryWorkspaceMemberRepository,
     InMemoryWorkspaceRepository,
 )
-
-
-class FakeRedis:
-    """In-memory Redis fake supporting get, setex, delete, scan_iter, and unlink."""
-
-    def __init__(self) -> None:
-        self.store: dict[str, str] = {}
-        self.simulate_error: bool = False
-
-    async def get(self, key: str) -> str | None:
-        if self.simulate_error:
-            raise RedisError("Simulated Redis get failure")
-        return self.store.get(key)
-
-    async def setex(self, key: str, ttl: int, value: str) -> bool:
-        _ = ttl
-        if self.simulate_error:
-            raise RedisError("Simulated Redis set failure")
-        self.store[key] = value
-        return True
-
-    async def delete(self, key: str) -> int:
-        if self.simulate_error:
-            raise RedisError("Simulated Redis delete failure")
-        if key in self.store:
-            del self.store[key]
-            return 1
-        return 0
-
-    async def scan_iter(self, match: str = "*", count: int = 100) -> AsyncGenerator[str, None]:
-        _ = count
-        if self.simulate_error:
-            raise RedisError("Simulated Redis scan failure")
-        for k in list(self.store.keys()):
-            if fnmatch.fnmatch(k, match):
-                yield k
-
-    async def unlink(self, *keys: str) -> int:
-        if self.simulate_error:
-            raise RedisError("Simulated Redis unlink failure")
-        deleted = 0
-        for k in keys:
-            if k in self.store:
-                del self.store[k]
-                deleted += 1
-        return deleted
 
 
 class InMemoryLabelRepoForDay7(LabelRepository):
@@ -164,6 +118,13 @@ class InMemoryLabelRepoForDay7(LabelRepository):
     async def list_by_task(self, task_id: int) -> list[Label]:
         label_ids = [lid for tid, lid in self._task_labels if tid == task_id]
         return [self._labels[lid] for lid in label_ids if lid in self._labels]
+
+    async def delete(self, record_id: int) -> bool:
+        if record_id in self._labels:
+            del self._labels[record_id]
+            self._task_labels = {pair for pair in self._task_labels if pair[1] != record_id}
+            return True
+        return False
 
 
 class InMemoryTaskRepoForDay7(TaskRepository):
@@ -483,24 +444,35 @@ async def test_cache_service_build_project_tasks_cache_key_deterministic() -> No
     params_1 = {"search": "login", "statuses": ["TODO", "IN_PROGRESS"], "limit": 20}
     params_2 = {"limit": 20, "statuses": ["TODO", "IN_PROGRESS"], "search": "login"}
 
-    key_1 = service.build_project_tasks_cache_key(project_id=10, page=1, limit=20, query_parts=params_1)
-    key_2 = service.build_project_tasks_cache_key(project_id=10, page=1, limit=20, query_parts=params_2)
+    key_1 = service.build_project_tasks_cache_key(
+        project_id=10, version=1, page=1, limit=20, query_parts=params_1
+    )
+    key_2 = service.build_project_tasks_cache_key(
+        project_id=10, version=1, page=1, limit=20, query_parts=params_2
+    )
 
     assert key_1 == key_2
-    assert key_1.startswith("cache:project:10:tasks:page_1_limit_20:")
+    assert key_1.startswith("cache:project:10:tasks:v_1:page_1_limit_20:")
 
     params_different = {"search": "logout", "limit": 20}
     key_different = service.build_project_tasks_cache_key(
-        project_id=10, page=1, limit=20, query_parts=params_different
+        project_id=10, version=1, page=1, limit=20, query_parts=params_different
     )
     assert key_1 != key_different
 
 
 @pytest.mark.anyio
-async def test_cache_service_crud_and_invalidation() -> None:
-    """Verify get, set, delete, and pattern invalidation in CacheService."""
+async def test_cache_service_versioning_and_crud() -> None:
+    """Verify version bumping and get/set/delete in CacheService."""
     fake_redis = FakeRedis()
     service = CacheService(cast(Redis, fake_redis))
+
+    initial_version = await service.get_project_tasks_version(10)
+    assert initial_version == 1
+
+    next_version = await service.bump_project_tasks_version(10)
+    assert next_version == 2
+    assert await service.get_project_tasks_version(10) == 2
 
     miss = await service.get("missing_key")
     assert miss is None
@@ -516,16 +488,6 @@ async def test_cache_service_crud_and_invalidation() -> None:
     assert deleted is True
     assert await service.get("cache:project:1:tasks:sample") is None
 
-    await service.set("cache:project:5:tasks:page_1", {"page": 1})
-    await service.set("cache:project:5:tasks:page_2", {"page": 2})
-    await service.set("cache:project:99:tasks:page_1", {"page": 1})
-
-    deleted_count = await service.invalidate_project_tasks(5)
-    assert deleted_count == 2
-    assert await service.get("cache:project:5:tasks:page_1") is None
-    assert await service.get("cache:project:5:tasks:page_2") is None
-    assert await service.get("cache:project:99:tasks:page_1") is not None
-
 
 @pytest.mark.anyio
 async def test_cache_service_resilience_on_redis_errors() -> None:
@@ -538,6 +500,8 @@ async def test_cache_service_resilience_on_redis_errors() -> None:
     assert await service.set("key", {"a": 1}) is False
     assert await service.delete("key") is False
     assert await service.invalidate_pattern("cache:*") == 0
+    assert await service.get_project_tasks_version(1) == 1
+    assert await service.bump_project_tasks_version(1) == 1
 
 
 @pytest.mark.anyio
@@ -583,6 +547,31 @@ async def test_search_by_title_and_description(
     resp_none = await client.get(f"/api/v1/projects/{proj.id}/tasks?search=nonexistent_token")
     assert resp_none.status_code == 200
     assert resp_none.json()["total"] == 0
+
+
+@pytest.mark.anyio
+async def test_search_strips_whitespace_only_query(
+    day7_ctx: Day7TestContext,
+    client: httpx.AsyncClient,
+) -> None:
+    """Whitespace-only search query is stripped to None, returning unconstrained tasks."""
+    _, proj = await _seed_day7_project(day7_ctx)
+    app.dependency_overrides[get_current_user] = lambda: day7_ctx.owner
+
+    await day7_ctx.task_repo.create_task(
+        project_id=proj.id,
+        created_by=day7_ctx.owner.id,
+        title="First Task",
+    )
+    await day7_ctx.task_repo.create_task(
+        project_id=proj.id,
+        created_by=day7_ctx.owner.id,
+        title="Second Task",
+    )
+
+    resp = await client.get(f"/api/v1/projects/{proj.id}/tasks?search=%20%20%20")
+    assert resp.status_code == 200
+    assert resp.json()["total"] == 2
 
 
 @pytest.mark.anyio
@@ -674,6 +663,22 @@ async def test_filtering_by_due_date_range(
 
 
 @pytest.mark.anyio
+async def test_filter_due_date_from_after_to_returns_400(
+    day7_ctx: Day7TestContext,
+    client: httpx.AsyncClient,
+) -> None:
+    """Passing due_date_from greater than due_date_to returns 400 Bad Request."""
+    _, proj = await _seed_day7_project(day7_ctx)
+    app.dependency_overrides[get_current_user] = lambda: day7_ctx.owner
+
+    resp = await client.get(
+        f"/api/v1/projects/{proj.id}/tasks?due_date_from=2026-06-10T00:00:00Z&due_date_to=2026-06-01T00:00:00Z"
+    )
+    assert resp.status_code == 400
+    assert resp.json()["message"] == ERROR_INVALID_DATE_RANGE
+
+
+@pytest.mark.anyio
 async def test_filtering_by_label_id(
     day7_ctx: Day7TestContext,
     client: httpx.AsyncClient,
@@ -753,7 +758,7 @@ async def test_sorting_by_title_and_due_date(
     day7_ctx: Day7TestContext,
     client: httpx.AsyncClient,
 ) -> None:
-    """Verify title sorting and due_date sorting (nulls placed last)."""
+    """Verify title sorting and due_date sorting (nulls placed last in both directions)."""
     _, proj = await _seed_day7_project(day7_ctx)
     app.dependency_overrides[get_current_user] = lambda: day7_ctx.owner
 
@@ -828,11 +833,11 @@ async def test_pagination_mechanics(
 
 
 @pytest.mark.anyio
-async def test_redis_cache_hit_and_proactive_invalidation(
+async def test_redis_cache_hit_and_version_invalidation(
     day7_ctx: Day7TestContext,
     client: httpx.AsyncClient,
 ) -> None:
-    """First request misses cache, second hits cache; mutations invalidate cache proactively."""
+    """First request misses cache, second hits cache; mutations bump version preventing stale reads."""
     _, proj = await _seed_day7_project(day7_ctx)
     app.dependency_overrides[get_current_user] = lambda: day7_ctx.owner
 
@@ -843,11 +848,11 @@ async def test_redis_cache_hit_and_proactive_invalidation(
     )
 
     assert day7_ctx.task_repo.list_call_count == 0
+    assert await day7_ctx.cache_service.get_project_tasks_version(proj.id) == 1
 
     resp_1 = await client.get(f"/api/v1/projects/{proj.id}/tasks?page=1&limit=10")
     assert resp_1.status_code == 200
     assert day7_ctx.task_repo.list_call_count == 1
-    assert len(day7_ctx.fake_redis.store) == 1
 
     resp_2 = await client.get(f"/api/v1/projects/{proj.id}/tasks?page=1&limit=10")
     assert resp_2.status_code == 200
@@ -858,45 +863,38 @@ async def test_redis_cache_hit_and_proactive_invalidation(
         json={"title": "New Task Invalidation Trigger"},
     )
     assert create_resp.status_code == 201
-    assert len(day7_ctx.fake_redis.store) == 0
+    assert await day7_ctx.cache_service.get_project_tasks_version(proj.id) == 2
 
     resp_3 = await client.get(f"/api/v1/projects/{proj.id}/tasks?page=1&limit=10")
     assert resp_3.status_code == 200
     assert day7_ctx.task_repo.list_call_count == 2
     assert resp_3.json()["total"] == 2
-    assert len(day7_ctx.fake_redis.store) == 1
 
     patch_resp = await client.patch(
         f"/api/v1/tasks/{t1.id}",
         json={"title": "Updated Task Title"},
     )
     assert patch_resp.status_code == 200
-    assert len(day7_ctx.fake_redis.store) == 0
-
-    await client.get(f"/api/v1/projects/{proj.id}/tasks?page=1&limit=10")
-    assert len(day7_ctx.fake_redis.store) == 1
+    assert await day7_ctx.cache_service.get_project_tasks_version(proj.id) == 3
 
     status_resp = await client.patch(
         f"/api/v1/tasks/{t1.id}/status",
         json={"status": "IN_PROGRESS"},
     )
     assert status_resp.status_code == 200
-    assert len(day7_ctx.fake_redis.store) == 0
-
-    await client.get(f"/api/v1/projects/{proj.id}/tasks?page=1&limit=10")
-    assert len(day7_ctx.fake_redis.store) == 1
+    assert await day7_ctx.cache_service.get_project_tasks_version(proj.id) == 4
 
     del_resp = await client.delete(f"/api/v1/tasks/{t1.id}")
     assert del_resp.status_code == 200
-    assert len(day7_ctx.fake_redis.store) == 0
+    assert await day7_ctx.cache_service.get_project_tasks_version(proj.id) == 5
 
 
 @pytest.mark.anyio
-async def test_label_association_invalidates_task_cache(
+async def test_label_mutation_and_deletion_invalidates_task_cache(
     day7_ctx: Day7TestContext,
     client: httpx.AsyncClient,
 ) -> None:
-    """Attaching and detaching labels invalidates the task list cache for the project."""
+    """Attaching, detaching, and deleting labels increments project version."""
     _, proj = await _seed_day7_project(day7_ctx)
     app.dependency_overrides[get_current_user] = lambda: day7_ctx.owner
 
@@ -907,28 +905,73 @@ async def test_label_association_invalidates_task_cache(
         title="Button alignment",
     )
 
-    await client.get(f"/api/v1/projects/{proj.id}/tasks?page=1&limit=10")
-    assert len(day7_ctx.fake_redis.store) == 1
+    initial_ver = await day7_ctx.cache_service.get_project_tasks_version(proj.id)
 
     assign_resp = await client.post(f"/api/v1/tasks/{t1.id}/labels/{lbl.id}")
     assert assign_resp.status_code == 200
-    assert len(day7_ctx.fake_redis.store) == 0
-
-    await client.get(f"/api/v1/projects/{proj.id}/tasks?page=1&limit=10")
-    assert len(day7_ctx.fake_redis.store) == 1
+    ver_after_assign = await day7_ctx.cache_service.get_project_tasks_version(proj.id)
+    assert ver_after_assign == initial_ver + 1
 
     detach_resp = await client.delete(f"/api/v1/tasks/{t1.id}/labels/{lbl.id}")
     assert detach_resp.status_code == 200
-    assert len(day7_ctx.fake_redis.store) == 0
+    ver_after_detach = await day7_ctx.cache_service.get_project_tasks_version(proj.id)
+    assert ver_after_detach == ver_after_assign + 1
+
+    delete_label_resp = await client.delete(f"/api/v1/labels/{lbl.id}")
+    assert delete_label_resp.status_code == 200
+    ver_after_delete = await day7_ctx.cache_service.get_project_tasks_version(proj.id)
+    assert ver_after_delete == ver_after_detach + 1
 
 
 @pytest.mark.anyio
-async def test_real_task_repository_sql_compilation() -> None:
-    """Verify that TaskRepository compiles complex search, filter, sorting, and subqueries cleanly."""
+async def test_real_task_repository_sql_compilation_with_mysql_dialect() -> None:
+    """Verify that TaskRepository compiles exact MySQL SQL statements for filtering, searching, and sorting."""
     fake_session = FakeAsyncSession()
     repo = TaskRepository(cast(Any, fake_session))
-    assert repo.session is fake_session
 
-    stmt = select(Task).where(Task.project_id == 1)
-    compiled = str(stmt.compile())
-    assert "WHERE tasks.project_id" in compiled
+    _, date_asc_query = repo.build_list_queries(
+        project_id=1,
+        pagination=PaginationParams(page=1, limit=10),
+        sort_by=TaskSortBy.DUE_DATE,
+        sort_order=SortOrder.ASC,
+    )
+    sql_date_asc = str(date_asc_query.compile(dialect=mysql.dialect()))
+    assert "ORDER BY tasks.due_date IS NULL ASC, tasks.due_date ASC, tasks.id ASC" in sql_date_asc
+
+    _, date_desc_query = repo.build_list_queries(
+        project_id=1,
+        pagination=PaginationParams(page=1, limit=10),
+        sort_by=TaskSortBy.DUE_DATE,
+        sort_order=SortOrder.DESC,
+    )
+    sql_date_desc = str(date_desc_query.compile(dialect=mysql.dialect()))
+    assert "ORDER BY tasks.due_date IS NULL ASC, tasks.due_date DESC, tasks.id DESC" in sql_date_desc
+
+    _, search_query = repo.build_list_queries(
+        project_id=1,
+        pagination=PaginationParams(page=1, limit=10),
+        search="special%_keyword",
+    )
+    sql_search = str(search_query.compile(dialect=mysql.dialect()))
+    assert "ESCAPE '/'" in sql_search
+
+    _, full_filter_query = repo.build_list_queries(
+        project_id=1,
+        pagination=PaginationParams(page=1, limit=10),
+        statuses=[TaskStatus.TODO, TaskStatus.IN_PROGRESS],
+        priorities=[TaskPriority.HIGH, TaskPriority.URGENT],
+        assignee_id=99,
+        due_date_from=datetime(2026, 1, 1),
+        due_date_to=datetime(2026, 12, 31),
+        label_id=7,
+        sort_by=TaskSortBy.PRIORITY,
+        sort_order=SortOrder.DESC,
+    )
+    sql_full = str(full_filter_query.compile(dialect=mysql.dialect()))
+    assert "tasks.status IN" in sql_full
+    assert "tasks.priority IN" in sql_full
+    assert "tasks.assignee_id =" in sql_full
+    assert "tasks.due_date >=" in sql_full
+    assert "tasks.due_date <=" in sql_full
+    assert "tasks.id IN (SELECT task_labels.task_id" in sql_full
+    assert "CASE WHEN (tasks.priority =" in sql_full

@@ -7,11 +7,14 @@ from typing import Any, cast
 
 import httpx
 import pytest
+from redis.asyncio import Redis
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.core.cache import CacheService
 from app.core.config import get_settings
 from app.core.dependencies import (
+    get_cache_service,
     get_current_user,
     get_db,
     get_project_repository,
@@ -51,6 +54,7 @@ from app.services.project import ProjectService
 from app.services.task import TaskService
 from tests.conftest import (
     FakeAsyncSession,
+    FakeRedis,
     InMemoryUserRepository,
     InMemoryWorkspaceMemberRepository,
     InMemoryWorkspaceRepository,
@@ -286,6 +290,8 @@ class TaskTestContext:
 
     def __init__(self) -> None:
         self.session = cast(AsyncSession, FakeAsyncSession())
+        self.fake_redis = FakeRedis()
+        self.cache_service = CacheService(cast(Redis, self.fake_redis))
         self.user_repo = InMemoryUserRepository(self.session)
         self.member_repo = InMemoryWorkspaceMemberRepository(self.session, self.user_repo)
         self.workspace_repo = InMemoryWorkspaceRepository(self.session, self.member_repo)
@@ -307,6 +313,7 @@ class TaskTestContext:
             workspace_repo=self.workspace_repo,
             member_repo=self.member_repo,
             user_repo=self.user_repo,
+            cache_service=self.cache_service,
         )
 
         self.owner = self.user_repo.add_test_user(1, "owner@example.com")
@@ -321,6 +328,7 @@ def task_ctx() -> Generator[TaskTestContext, None, None]:
     """Wire in-memory test repositories into dependency overrides."""
     ctx = TaskTestContext()
     app.dependency_overrides[get_db] = lambda: ctx.session
+    app.dependency_overrides[get_cache_service] = lambda: ctx.cache_service
     app.dependency_overrides[get_user_repository] = lambda: ctx.user_repo
     app.dependency_overrides[get_workspace_repository] = lambda: ctx.workspace_repo
     app.dependency_overrides[get_workspace_member_repository] = lambda: ctx.member_repo
