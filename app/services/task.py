@@ -63,7 +63,7 @@ class TaskService:
         member_repo: WorkspaceMemberRepository,
         user_repo: UserRepository,
         cache_service: CacheService,
-        notification_service: NotificationService | None = None,
+        notification_service: NotificationService,
     ) -> None:
         self.session = session
         self.task_repo = task_repo
@@ -72,7 +72,7 @@ class TaskService:
         self.member_repo = member_repo
         self.user_repo = user_repo
         self.cache_service = cache_service
-        self.notification_service = notification_service or NotificationService()
+        self.notification_service = notification_service
 
     async def _validate_assignee_in_workspace(
         self,
@@ -149,7 +149,7 @@ class TaskService:
         project_id: int,
         current_user: User,
         data: TaskCreate,
-        background_tasks: BackgroundTasks | None = None,
+        background_tasks: BackgroundTasks,
     ) -> TaskResponse:
         """Create a new task in a project verifying write role and invalidating project cache."""
         project = await self._get_project_for_create_task(
@@ -177,15 +177,18 @@ class TaskService:
         await self.session.refresh(task, attribute_names=["creator", "assignee"])
         await self.cache_service.bump_project_tasks_version(project_id)
 
-        assignee_user = task.assignee
-        if assignee_user is None and task.assignee_id is not None:
-            assignee_user = await self.user_repo.get_by_id(task.assignee_id)
-
-        if background_tasks is not None and assignee_user is not None:
+        if (
+            task.assignee is not None
+            and task.assignee_id != current_user.id
+            and task.assignee.email
+        ):
             background_tasks.add_task(
                 self.notification_service.send_task_assignment_notification,
-                assignee_email=assignee_user.email,
-                assignee_name=assignee_user.full_name,
+                task_id=task.id,
+                project_id=project_id,
+                assignee_id=task.assignee.id,
+                assigner_id=current_user.id,
+                assignee_email=task.assignee.email,
                 task_title=task.title,
                 project_name=project.name,
                 assigner_name=current_user.full_name,
@@ -368,7 +371,7 @@ class TaskService:
         task_id: int,
         current_user: User,
         data: TaskUpdate,
-        background_tasks: BackgroundTasks | None = None,
+        background_tasks: BackgroundTasks,
     ) -> TaskResponse:
         """Update task attributes and invalidate project task caches."""
         task, project, _ = await self._get_task_for_write(
@@ -399,19 +402,19 @@ class TaskService:
         await self.session.refresh(task, attribute_names=["creator", "assignee"])
         await self.cache_service.bump_project_tasks_version(project.id)
 
-        assignee_user = task.assignee
-        if assignee_user is None and task.assignee_id is not None:
-            assignee_user = await self.user_repo.get_by_id(task.assignee_id)
-
         if (
-            background_tasks is not None
-            and assignee_user is not None
+            task.assignee is not None
             and task.assignee_id != old_assignee_id
+            and task.assignee_id != current_user.id
+            and task.assignee.email
         ):
             background_tasks.add_task(
                 self.notification_service.send_task_assignment_notification,
-                assignee_email=assignee_user.email,
-                assignee_name=assignee_user.full_name,
+                task_id=task.id,
+                project_id=project.id,
+                assignee_id=task.assignee.id,
+                assigner_id=current_user.id,
+                assignee_email=task.assignee.email,
                 task_title=task.title,
                 project_name=project.name,
                 assigner_name=current_user.full_name,
@@ -419,12 +422,52 @@ class TaskService:
 
         return TaskResponse.model_validate(task)
 
+    def _schedule_status_notification(
+        self,
+        task: Task,
+        project: Project,
+        current_user: User,
+        old_status: TaskStatus,
+        new_status: TaskStatus,
+        background_tasks: BackgroundTasks,
+    ) -> None:
+        """Enqueue status change notification excluding current actor from recipients."""
+        recipients: list[str] = []
+        if (
+            task.creator is not None
+            and task.creator.id != current_user.id
+            and task.creator.email
+        ):
+            recipients.append(task.creator.email)
+
+        if (
+            task.assignee is not None
+            and task.assignee.id != current_user.id
+            and task.assignee.email
+            and task.assignee.email not in recipients
+        ):
+            recipients.append(task.assignee.email)
+
+        if recipients:
+            background_tasks.add_task(
+                self.notification_service.send_task_status_changed_notification,
+                task_id=task.id,
+                project_id=project.id,
+                old_status=old_status,
+                new_status=new_status,
+                updater_id=current_user.id,
+                recipient_emails=recipients,
+                task_title=task.title,
+                project_name=project.name,
+                updater_name=current_user.full_name,
+            )
+
     async def update_task_status(
         self,
         task_id: int,
         current_user: User,
         data: TaskStatusUpdate,
-        background_tasks: BackgroundTasks | None = None,
+        background_tasks: BackgroundTasks,
     ) -> TaskResponse:
         """Fast status transition and cache invalidation."""
         task, project, _ = await self._get_task_for_write(
@@ -440,29 +483,15 @@ class TaskService:
         await self.session.refresh(task, attribute_names=["creator", "assignee"])
         await self.cache_service.bump_project_tasks_version(task.project_id)
 
-        if background_tasks is not None and old_status != data.status:
-            recipients: list[str] = []
-            creator_user = task.creator or await self.user_repo.get_by_id(task.created_by)
-            if creator_user and creator_user.email:
-                recipients.append(creator_user.email)
-
-            assignee_user = task.assignee
-            if assignee_user is None and task.assignee_id is not None:
-                assignee_user = await self.user_repo.get_by_id(task.assignee_id)
-
-            if assignee_user and assignee_user.email and assignee_user.email not in recipients:
-                recipients.append(assignee_user.email)
-
-            if recipients:
-                background_tasks.add_task(
-                    self.notification_service.send_task_status_changed_notification,
-                    recipient_emails=recipients,
-                    task_title=task.title,
-                    project_name=project.name,
-                    old_status=old_status,
-                    new_status=data.status,
-                    updater_name=current_user.full_name,
-                )
+        if old_status != data.status:
+            self._schedule_status_notification(
+                task=task,
+                project=project,
+                current_user=current_user,
+                old_status=old_status,
+                new_status=data.status,
+                background_tasks=background_tasks,
+            )
 
         return TaskResponse.model_validate(task)
 

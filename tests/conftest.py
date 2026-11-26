@@ -43,6 +43,7 @@ class FakeAsyncSession:
     def __init__(self) -> None:
         self.commit_count: int = 0
         self.rollback_count: int = 0
+        self.refresh_callbacks: list[Any] = []
 
     async def commit(self) -> None:
         self.commit_count += 1
@@ -51,7 +52,8 @@ class FakeAsyncSession:
         self.rollback_count += 1
 
     async def refresh(self, instance: Any, attribute_names: Sequence[str] | None = None) -> None:
-        _ = (instance, attribute_names)
+        for cb in self.refresh_callbacks:
+            cb(instance, attribute_names)
 
 
 class FakeRedis:

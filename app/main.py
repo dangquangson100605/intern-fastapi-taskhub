@@ -26,7 +26,6 @@ from app.core.messages import (
     ERROR_RESOURCE_ALREADY_EXISTS,
 )
 from app.core.redis import close_redis, ping_redis
-from app.schemas.common import ErrorResponse
 
 settings = get_settings()
 
@@ -90,8 +89,9 @@ app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
     description=app_description,
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url="/docs" if settings.DEBUG else None,
+    redoc_url="/redoc" if settings.DEBUG else None,
+    openapi_url="/openapi.json" if settings.DEBUG else None,
     contact={
         "name": "TaskHub API Support",
         "email": "support@taskhub.io",
@@ -101,15 +101,6 @@ app = FastAPI(
         "identifier": "MIT",
     },
     openapi_tags=openapi_tags,
-    responses={
-        400: {"model": ErrorResponse, "description": "Bad Request"},
-        401: {"model": ErrorResponse, "description": "Unauthorized"},
-        403: {"model": ErrorResponse, "description": "Forbidden"},
-        404: {"model": ErrorResponse, "description": "Not Found"},
-        409: {"model": ErrorResponse, "description": "Conflict"},
-        422: {"model": ErrorResponse, "description": "Unprocessable Entity"},
-        500: {"model": ErrorResponse, "description": "Internal Server Error"},
-    },
     lifespan=lifespan,
 )
 
@@ -130,7 +121,7 @@ async def validation_exception_handler(request: Request, exc: Exception) -> JSON
         content={
             "error": "VALIDATION_ERROR",
             "message": "Request validation failed",
-            "path": str(request.url),
+            "path": request.url.path,
             "details": details,
         },
     )
@@ -148,7 +139,7 @@ async def integrity_exception_handler(request: Request, exc: Exception) -> JSONR
             content={
                 "error": "CONFLICT",
                 "message": ERROR_RESOURCE_ALREADY_EXISTS,
-                "path": str(request.url),
+                "path": request.url.path,
             },
         )
     if "1451" in orig_msg or "cannot delete or update a parent row" in orig_msg:
@@ -157,7 +148,7 @@ async def integrity_exception_handler(request: Request, exc: Exception) -> JSONR
             content={
                 "error": "CONFLICT",
                 "message": ERROR_CANNOT_DELETE_USER_WITH_DEPENDENCIES,
-                "path": str(request.url),
+                "path": request.url.path,
             },
         )
     if (
@@ -170,7 +161,7 @@ async def integrity_exception_handler(request: Request, exc: Exception) -> JSONR
             content={
                 "error": "INVALID_REFERENCE",
                 "message": ERROR_FOREIGN_KEY_VIOLATION,
-                "path": str(request.url),
+                "path": request.url.path,
             },
         )
 
@@ -179,7 +170,7 @@ async def integrity_exception_handler(request: Request, exc: Exception) -> JSONR
         content={
             "error": "INTEGRITY_ERROR",
             "message": ERROR_DATABASE_INTEGRITY,
-            "path": str(request.url),
+            "path": request.url.path,
         },
     )
 

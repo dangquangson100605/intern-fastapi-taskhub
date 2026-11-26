@@ -131,7 +131,7 @@ async def app_exception_handler(request: Request, exc: Exception) -> JSONRespons
             content={
                 "error": exc.error_code,
                 "message": exc.message,
-                "path": str(request.url),
+                "path": request.url.path,
             },
             headers=exc.headers,
         )
@@ -146,6 +146,6 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
         content={
             "error": "INTERNAL_ERROR",
             "message": ERROR_INTERNAL_SERVER,
-            "path": str(request.url),
+            "path": request.url.path,
         },
     )

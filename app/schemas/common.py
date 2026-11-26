@@ -1,6 +1,6 @@
 """Shared/common Pydantic schemas used across multiple modules."""
 
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, Field
 
@@ -48,3 +48,6 @@ class ErrorResponse(BaseModel):
     error: str = Field(description="Machine-readable error code")
     message: str = Field(description="Human-readable error description")
     path: str = Field(description="Request URL path where error occurred")
+    details: list[dict[str, Any]] | None = Field(
+        default=None, description="Detailed validation errors if applicable"
+    )

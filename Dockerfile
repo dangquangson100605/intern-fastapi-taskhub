@@ -6,12 +6,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /install
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    default-libmysqlclient-dev \
-    pkg-config \
-    && rm -rf /var/lib/apt/lists/*
-
 COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install/deps -r requirements.txt
 
@@ -35,7 +29,7 @@ COPY alembic/ ./alembic/
 COPY alembic.ini .
 COPY entrypoint.sh .
 
-RUN chmod +x entrypoint.sh && chown -R appuser:appuser /app /install/deps
+RUN chmod +x entrypoint.sh
 
 USER appuser
 
