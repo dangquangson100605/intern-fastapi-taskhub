@@ -35,6 +35,7 @@ from app.schemas.common import PaginationParams
 from app.services.auth import AuthService
 from app.services.comment import CommentService
 from app.services.label import LabelService
+from app.services.notification import NotificationService
 from app.services.project import ProjectService
 from app.services.task import TaskService
 from app.services.user import UserService
@@ -252,6 +253,17 @@ def get_cache_service() -> CacheService:
 CacheServiceDep = Annotated[CacheService, Depends(get_cache_service)]
 
 
+_notification_service = NotificationService()
+
+
+def get_notification_service() -> NotificationService:
+    """Dependency: retrieve shared NotificationService instance."""
+    return _notification_service
+
+
+NotificationServiceDep = Annotated[NotificationService, Depends(get_notification_service)]
+
+
 def get_task_service(
     session: SessionDep,
     task_repo: TaskRepoDep,
@@ -260,8 +272,9 @@ def get_task_service(
     member_repo: WorkspaceMemberRepoDep,
     user_repo: UserRepoDep,
     cache_service: CacheServiceDep,
+    notification_service: NotificationServiceDep,
 ) -> TaskService:
-    """Dependency: instantiate TaskService with repositories and database session."""
+    """Dependency: instantiate TaskService with repositories, cache, and notification services."""
     return TaskService(
         session=session,
         task_repo=task_repo,
@@ -270,6 +283,7 @@ def get_task_service(
         member_repo=member_repo,
         user_repo=user_repo,
         cache_service=cache_service,
+        notification_service=notification_service,
     )
 
 

@@ -44,6 +44,7 @@ from app.repositories.project import ProjectRepository
 from app.repositories.task import TaskRepository
 from app.schemas.common import PaginationParams
 from app.services.label import LabelService
+from app.services.notification import NotificationService
 from app.services.project import ProjectService
 from app.services.task import TaskService
 from tests.conftest import (
@@ -384,6 +385,7 @@ class Day7TestContext:
             member_repo=self.member_repo,
             user_repo=self.user_repo,
             cache_service=self.cache_service,
+            notification_service=NotificationService(),
         )
         self.label_service = LabelService(
             session=self.session,

@@ -50,6 +50,7 @@ from app.repositories.base import PaginationResult
 from app.repositories.project import ProjectRepository
 from app.repositories.task import TaskRepository
 from app.schemas.common import PaginationParams
+from app.services.notification import NotificationService
 from app.services.project import ProjectService
 from app.services.task import TaskService
 from tests.conftest import (
@@ -142,6 +143,12 @@ class InMemoryTaskRepository(TaskRepository):
         self.user_repo = user_repo
         self._tasks: dict[int, Task] = {}
         self._next_id: int = 1
+        if hasattr(session, "refresh_callbacks"):
+            session.refresh_callbacks.append(self._on_session_refresh)
+
+    def _on_session_refresh(self, instance: Any, attribute_names: Sequence[str] | None) -> None:
+        if isinstance(instance, Task):
+            self._attach_relations(instance)
 
     def _attach_relations(self, task: Task) -> Task:
         task.creator = self.user_repo._users.get(task.created_by)  # type: ignore[assignment]
@@ -306,6 +313,7 @@ class TaskTestContext:
             workspace_repo=self.workspace_repo,
             member_repo=self.member_repo,
         )
+        self.notification_service = NotificationService()
         self.task_service = TaskService(
             session=self.session,
             task_repo=self.task_repo,
@@ -314,6 +322,7 @@ class TaskTestContext:
             member_repo=self.member_repo,
             user_repo=self.user_repo,
             cache_service=self.cache_service,
+            notification_service=self.notification_service,
         )
 
         self.owner = self.user_repo.add_test_user(1, "owner@example.com")

@@ -29,6 +29,48 @@ from app.core.redis import close_redis, ping_redis
 
 settings = get_settings()
 
+openapi_tags = [
+    {
+        "name": "Auth",
+        "description": "User registration, authentication, JWT tokens, and token revoking.",
+    },
+    {
+        "name": "Users",
+        "description": "User profile retrieval, updates, and administrative user controls.",
+    },
+    {
+        "name": "Workspaces",
+        "description": "Workspace management and multi-tenant membership role administration.",
+    },
+    {
+        "name": "Projects",
+        "description": "Project creation, status transitions, and workspace scoping.",
+    },
+    {
+        "name": "Tasks",
+        "description": "Task lifecycle, assignment, status transitions, search/filtering, and background notifications.",
+    },
+    {
+        "name": "Labels",
+        "description": "Project label definitions and task-label associations.",
+    },
+    {
+        "name": "Comments",
+        "description": "Discussion comments on tasks with author tracking.",
+    },
+]
+
+app_description = (
+    "**TaskHub** — A production-ready Task Management API.\n\n"
+    "### Key Architecture & Features:\n"
+    "- **Multi-tenant RBAC**: Admin, Workspace Owner, Editor, and Viewer permission levels.\n"
+    "- **JWT Authentication**: Access and refresh tokens with Redis blacklist token revoking.\n"
+    "- **Advanced Querying**: Search, multi-field filtering, sorting, and pagination.\n"
+    "- **Performance & Caching**: Project-versioned Redis caching with automatic invalidation.\n"
+    "- **Background Tasks**: Non-blocking notifications for task assignments and status transitions.\n"
+    "- **Standardized Error Responses**: Uniform JSON error envelopes across all endpoints.\n"
+)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -46,13 +88,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
-    description=(
-        "**TaskHub** — A comprehensive Task Management API.\n\n"
-        "Manage workspaces, projects, tasks, labels, and comments "
-        "with role-based access control."
-    ),
-    docs_url="/docs",
-    redoc_url="/redoc",
+    description=app_description,
+    docs_url="/docs" if settings.DEBUG else None,
+    redoc_url="/redoc" if settings.DEBUG else None,
+    openapi_url="/openapi.json" if settings.DEBUG else None,
+    contact={
+        "name": "TaskHub API Support",
+        "email": "support@taskhub.io",
+    },
+    license_info={
+        "name": "MIT",
+        "identifier": "MIT",
+    },
+    openapi_tags=openapi_tags,
     lifespan=lifespan,
 )
 
@@ -73,7 +121,7 @@ async def validation_exception_handler(request: Request, exc: Exception) -> JSON
         content={
             "error": "VALIDATION_ERROR",
             "message": "Request validation failed",
-            "path": str(request.url),
+            "path": request.url.path,
             "details": details,
         },
     )
@@ -91,7 +139,7 @@ async def integrity_exception_handler(request: Request, exc: Exception) -> JSONR
             content={
                 "error": "CONFLICT",
                 "message": ERROR_RESOURCE_ALREADY_EXISTS,
-                "path": str(request.url),
+                "path": request.url.path,
             },
         )
     if "1451" in orig_msg or "cannot delete or update a parent row" in orig_msg:
@@ -100,7 +148,7 @@ async def integrity_exception_handler(request: Request, exc: Exception) -> JSONR
             content={
                 "error": "CONFLICT",
                 "message": ERROR_CANNOT_DELETE_USER_WITH_DEPENDENCIES,
-                "path": str(request.url),
+                "path": request.url.path,
             },
         )
     if (
@@ -113,7 +161,7 @@ async def integrity_exception_handler(request: Request, exc: Exception) -> JSONR
             content={
                 "error": "INVALID_REFERENCE",
                 "message": ERROR_FOREIGN_KEY_VIOLATION,
-                "path": str(request.url),
+                "path": request.url.path,
             },
         )
 
@@ -122,7 +170,7 @@ async def integrity_exception_handler(request: Request, exc: Exception) -> JSONR
         content={
             "error": "INTEGRITY_ERROR",
             "message": ERROR_DATABASE_INTEGRITY,
-            "path": str(request.url),
+            "path": request.url.path,
         },
     )
 
